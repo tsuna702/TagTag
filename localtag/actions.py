@@ -110,7 +110,7 @@ class Work:
                                    path=self.new_path or self.af.path)
 
     def targets(self, field):
-        return [k for k in FIELDS if k in self.tags] if field == ALL else [field]
+        return list(self.tags) if field == ALL else [field]
 
     def map_values(self, field, fn):
         for k in self.targets(field):
@@ -253,7 +253,8 @@ def run_actions(actions: list[dict], files: list[AudioFile]) -> list[Plan]:
             plans.append(p)
             continue
         old = f.tags
-        p.changes = {k: w.tags.get(k, []) for k in FIELDS if w.tags.get(k, []) != old.get(k, [])}
+        keys = list(dict.fromkeys(list(old) + list(w.tags)))
+        p.changes = {k: w.tags.get(k, []) for k in keys if w.tags.get(k, []) != old.get(k, [])}
         if w.pics_changed:
             p.pictures = w.pictures
         if w.new_path and w.new_path != f.path:

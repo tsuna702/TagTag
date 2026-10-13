@@ -14,6 +14,8 @@ from PySide6.QtWidgets import (
 from .actiondialogs import ActionEditDialog, ActionsDialog, PlansPreview, choose_action_type
 from .actions import ACTION_TYPES, ActionStore, describe, new_action, run_actions
 from .converters import CONVERTERS, AutoNumber
+from .export import ExportDialog, PlaylistDialog
+from .exttags import ExtendedTagsDialog
 from .filterexpr import FilterError, compile_filter
 from .model import COLUMN_WIDTHS, COLUMNS, FileModel, SortProxy, fmt_length, fmt_size
 from .panel import TagPanel
@@ -155,12 +157,17 @@ class MainWindow(QMainWindow):
         self._act(m, "목록 새로 고침", self.refresh, "F5")
         self._act(m, "목록 비우기", self.clear_list)
         m.addSeparator()
+        self._act(m, "내보내기 (CSV·HTML·텍스트)…", self.export_list, "Ctrl+E")
+        self._act(m, "재생목록 만들기…", self.make_playlist, "Ctrl+L")
+        m.addSeparator()
         quit_act = self._act(m, "종료", self.close, QKeySequence.Quit)
         quit_act.setMenuRole(QAction.QuitRole)
 
         m = mb.addMenu("편집")
         self.undo_act = self._act(m, "실행 취소", self.undo, QKeySequence.Undo)
         self.undo_act.setEnabled(False)
+        m.addSeparator()
+        self._act(m, "확장 태그…", self.extended_tags, "Ctrl+T")
         m.addSeparator()
         self._act(m, "모두 선택", self.table.selectAll, QKeySequence.SelectAll)
         self._act(m, "선택 반전", self.invert_selection, "Ctrl+I")
@@ -230,6 +237,10 @@ class MainWindow(QMainWindow):
         m = QMenu(self)
         m.addAction("재생", self.play)
         m.addAction("Finder에서 보기", self.reveal)
+        m.addSeparator()
+        m.addAction("확장 태그…", self.extended_tags)
+        m.addAction("재생목록 만들기…", self.make_playlist)
+        m.addAction("내보내기…", self.export_list)
         m.addSeparator()
         conv = m.addMenu("변환")
         for text, _, cls in CONVERTERS:
@@ -563,6 +574,33 @@ class MainWindow(QMainWindow):
             return
         self.apply_plans([Plan(f, remove_tags=True) for f in files], "태그 제거")
 
+    # ------------------------------------------------------------ 확장 태그 · 내보내기
+    def extended_tags(self):
+        files = self._files_for_command()
+        if not files:
+            return
+        dlg = ExtendedTagsDialog(self, files)
+        if not dlg.exec():
+            return
+        changes, pictures = dlg.result()
+        plans = [Plan(f, changes=dict(changes), pictures=pictures) for f in files]
+        self.apply_plans([p for p in plans if p.actionable], "확장 태그")
+
+    def export_list(self):
+        self._confirm_pending()
+        if not self.model.files:
+            QMessageBox.information(self, APP_NAME, "내보낼 파일이 없습니다.")
+            return
+        ExportDialog(self, self.selected_files(), self.visible_files(), self.settings, self.last_dir).exec()
+
+    def make_playlist(self):
+        files = self._files_for_command()
+        if not files:
+            return
+        dlg = PlaylistDialog(self, files, self.settings)
+        if dlg.exec():
+            self.statusBar().showMessage(f"재생목록을 만들었습니다: {os.path.basename(dlg.saved_path)}", 5000)
+
     # ------------------------------------------------------------ 필터
     def focus_filter(self):
         self.filter_edit.setFocus()
@@ -638,12 +676,40 @@ class MainWindow(QMainWindow):
         super().closeEvent(e)
 
 
+class App(QApplication):
+    """Dock 아이콘에 끌어다 놓거나 Finder의 '다음으로 열기'로 연 파일을 받는다."""
+
+    def __init__(self, argv):
+        super().__init__(argv)
+        self.window = None
+        self.pending = []
+        self.open_timer = QTimer(self)
+        self.open_timer.setSingleShot(True)
+        self.open_timer.setInterval(200)
+        self.open_timer.timeout.connect(self._open_pending)
+
+    def event(self, e):
+        if e.type() == QEvent.FileOpen:
+            path = e.file()
+            if path:
+                self.pending.append(path)
+                self.open_timer.start()  # 여러 파일이 한꺼번에 오면 모아서 연다
+            return True
+        return super().event(e)
+
+    def _open_pending(self):
+        paths, self.pending = self.pending, []
+        if self.window and paths:
+            self.window.load_paths(paths, replace=False)
+
+
 def main(argv=None):
     import sys
     argv = argv if argv is not None else sys.argv
-    app = QApplication(argv)
+    app = App(argv)
     app.setApplicationName(APP_NAME)
     w = MainWindow()
+    app.window = w
     w.show()
     paths = [p for p in argv[1:] if os.path.exists(p)]
     if paths:

@@ -15,7 +15,6 @@ from __future__ import annotations
 import re
 
 from .script import Context, ScriptError, evaluate
-from .tagio import FIELDS
 
 BINARY = {"IS", "HAS", "MATCHES", "GREATER", "LESS", "EQUAL"}
 UNARY = {"PRESENT", "MISSING"}
@@ -208,6 +207,6 @@ def compile_filter(text: str):
     words = [w.casefold() for k, w in toks if k in ("word", "str", "kw")]
 
     def plain(af):
-        hay = " ".join([af.filename] + [af.get(n) for n in FIELDS]).casefold()
+        hay = " ".join([af.filename] + [af.get(n) for n in af.tags]).casefold()
         return all(w in hay for w in words)
     return plain

@@ -342,7 +342,7 @@ class FilenameToTag(ConverterDialog):
         self._names = []
 
     def headers(self):
-        return ["파일명"] + [FIELD_LABELS[n] for n in self._names] + ["상태"]
+        return ["파일명"] + [FIELD_LABELS.get(n, n) for n in self._names] + ["상태"]
 
     def make_plans(self):
         self._names = []
@@ -432,12 +432,10 @@ class TagToTag(ConverterDialog):
     ok_text = "태그 쓰기"
 
     def build(self):
-        self.target = QComboBox()
-        for n in FIELDS:
-            self.target.addItem(FIELD_LABELS[n], n)
+        from .actiondialogs import field_combo
         last = self.settings.value("conv/tag2tag_field", "title", str)
-        if last in FIELDS:
-            self.target.setCurrentIndex(FIELDS.index(last))
+        self.target, self.target_value = field_combo(FIELDS, last)
+        self.target.editTextChanged.connect(self.schedule)
         self.target.currentIndexChanged.connect(self.schedule)
         self.form.addRow("필드:", self.target)
         self.fmt = self.add_format("포맷:", "tag2tag", [
@@ -453,7 +451,7 @@ class TagToTag(ConverterDialog):
 
     def make_plans(self):
         fmt = self.fmt.currentText()
-        name = self.target.currentData()
+        name = self.target_value()
         plans = []
         for i, f in enumerate(self.files):
             vals = split_values(evaluate(fmt, Context(f, i, len(self.files))))
@@ -467,7 +465,7 @@ class TagToTag(ConverterDialog):
 
     def remember(self):
         self.fmt.remember()
-        self.settings.setValue("conv/tag2tag_field", self.target.currentData())
+        self.settings.setValue("conv/tag2tag_field", self.target_value())
 
 
 # ------------------------------------------------------------------ 텍스트 → 태그
@@ -528,7 +526,7 @@ class TextToTag(ConverterDialog):
                 self.summary.setText(str(e))
 
     def headers(self):
-        return ["파일명", "줄"] + [FIELD_LABELS[n] for n in self._names] + ["상태"]
+        return ["파일명", "줄"] + [FIELD_LABELS.get(n, n) for n in self._names] + ["상태"]
 
     def make_plans(self):
         self._names = []

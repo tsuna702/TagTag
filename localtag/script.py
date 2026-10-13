@@ -12,25 +12,7 @@ import os
 import re
 from functools import lru_cache
 
-from .tagio import FIELDS, SEP
-
-# Mp3tag에서 쓰는 다른 이름도 받아 준다
-FIELD_ALIASES = {
-    "date": "year",
-    "tracknumber": "track",
-    "discnumber": "disc",
-    "band": "albumartist",
-    "album artist": "albumartist",
-    "album_artist": "albumartist",
-    "description": "comment",
-}
-
-
-def canonical_field(name: str) -> str | None:
-    n = name.strip().lower()
-    n = FIELD_ALIASES.get(n, n)
-    return n if n in FIELDS else None
-
+from .tagio import FIELDS, SEP, canonical_field, field_key
 
 class ScriptError(Exception):
     pass
@@ -171,10 +153,9 @@ class Context:
         af = self.af
         if n.startswith("_"):
             return [self._special(n)]
-        field = canonical_field(n)
-        if af is None or field is None:
+        if af is None:
             return []
-        return af.tags.get(field, [])
+        return af.tags.get(field_key(n), [])
 
     def field(self, name: str) -> str:
         vals = self.values(name)
@@ -496,10 +477,9 @@ class Pattern:
             if raw == "dummy":
                 regex.append(".*?")
             else:
-                name = raw if allow_any_name else canonical_field(raw)
-                if name is None:
-                    raise ScriptError(f"알 수 없는 필드: %{m.group(1)}%  (쓸 수 있는 필드: "
-                                      + ", ".join(FIELDS) + ", dummy)")
+                name = raw if allow_any_name else field_key(raw)
+                if not name:
+                    raise ScriptError("빈 필드 이름 %% 이 있습니다")
                 group = f"g{len(self.names)}"
                 self.names.append(name)
                 regex.append(f"(?P<{group}>.*?)")

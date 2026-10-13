@@ -14,7 +14,28 @@ from .actions import (
     ACTION_TYPES, ALL, CASE_MODES, COVER, FILENAME, describe, field_label, new_action,
 )
 from .converters import ConverterDialog, HelpDialog
-from .tagio import FIELDS
+from .tagio import FIELDS, field_key
+
+
+def field_combo(names, current):
+    """기본 필드 목록 + 직접 입력(확장 필드)."""
+    w = QComboBox()
+    w.setEditable(True)
+    w.setInsertPolicy(QComboBox.NoInsert)
+    for n in names:
+        w.addItem(field_label(n), n)
+    if current in names:
+        w.setCurrentIndex(names.index(current))
+    else:
+        w.setEditText(current or "")
+    w.setToolTip("목록에 없는 필드는 이름을 직접 입력하세요 (예: LYRICIST, MOOD)")
+
+    def value():
+        i = w.findText(w.currentText())
+        if i >= 0:
+            return w.itemData(i)
+        return field_key(w.currentText()) if w.currentText().strip() else names[0]
+    return w, value
 
 # 액션 종류별 입력 항목: (키, 제목, 종류)
 #   종류: field / field_all / field_fn / text / format / bool / mode / fields
@@ -54,12 +75,9 @@ class ActionEditDialog(QDialog):
         for key, label, kind in FORMS[action["type"]]:
             val = self.action.get(key)
             if kind in ("field", "field_all", "field_fn"):
-                w = QComboBox()
                 names = ([ALL] if kind == "field_all" else []) + FIELDS + ([FILENAME] if kind == "field_fn" else [])
-                for n in names:
-                    w.addItem(field_label(n), n)
-                w.setCurrentIndex(max(0, names.index(val)) if val in names else 0)
-                self.getters[key] = w.currentData
+                w, getter = field_combo(names, val)
+                self.getters[key] = getter
                 form.addRow(label + ":", w)
             elif kind == "mode":
                 w = QComboBox()

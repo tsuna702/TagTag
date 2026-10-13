@@ -20,9 +20,9 @@ from mutagen.asf import ASF, ASFByteArrayAttribute
 from mutagen.dsf import DSF
 from mutagen.flac import FLAC
 from mutagen.flac import Picture as FlacPicture
-from mutagen.id3 import APIC, COMM, ID3, TCON, Frames
+from mutagen.id3 import APIC, COMM, ID3, TCON, TXXX, USLT, Frames
 from mutagen.mp3 import MP3
-from mutagen.mp4 import MP4, MP4Cover
+from mutagen.mp4 import MP4, MP4Cover, MP4FreeForm
 from mutagen.ogg import OggFileType
 from mutagen.trueaudio import TrueAudio
 from mutagen.wave import WAVE
@@ -45,6 +45,35 @@ FIELD_LABELS = {
     "composer": "작곡가",
     "comment": "코멘트",
 }
+
+# Mp3tag에서 쓰는 다른 이름도 받아 준다
+FIELD_ALIASES = {
+    "date": "year",
+    "tracknumber": "track",
+    "discnumber": "disc",
+    "band": "albumartist",
+    "album artist": "albumartist",
+    "album_artist": "albumartist",
+    "description": "comment",
+}
+EXT_ALIASES = {"LYRICS": "UNSYNCEDLYRICS", "UNSYNCED LYRICS": "UNSYNCEDLYRICS"}
+
+
+def canonical_field(name: str) -> str | None:
+    """기본 필드 이름(소문자)이면 그 이름, 아니면 None."""
+    n = name.strip().lower()
+    n = FIELD_ALIASES.get(n, n)
+    return n if n in FIELDS else None
+
+
+def field_key(name: str) -> str:
+    """기본 필드는 소문자(title), 확장 필드는 대문자(LYRICIST) 키로."""
+    c = canonical_field(name)
+    if c:
+        return c
+    n = name.strip().upper()
+    return EXT_ALIASES.get(n, n)
+
 
 # 여러 값을 가진 필드를 한 줄로 표시할 때 쓰는 구분자 (Mp3tag과 동일)
 SEP = "\\\\"
@@ -117,6 +146,23 @@ ID3_MAP = {
     "composer": "TCOM",
 }
 ID3_CLASSES = (MP3, TrueAudio, WAVE, AIFF, DSF)
+# 확장 필드 이름 (Mp3tag 이름) ↔ ID3 프레임
+ID3_EXT = {
+    "LYRICIST": "TEXT", "PUBLISHER": "TPUB", "BPM": "TBPM", "COPYRIGHT": "TCOP",
+    "ENCODEDBY": "TENC", "ORIGARTIST": "TOPE", "CONDUCTOR": "TPE3", "MIXARTIST": "TPE4",
+    "ISRC": "TSRC", "SUBTITLE": "TIT3", "CONTENTGROUP": "TIT1", "GROUPING": "GRP1",
+    "MOOD": "TMOO", "INITIALKEY": "TKEY", "LANGUAGE": "TLAN", "MEDIATYPE": "TMED",
+    "ORIGYEAR": "TDOR", "RELEASETIME": "TDRL", "ALBUMSORT": "TSOA", "ARTISTSORT": "TSOP",
+    "TITLESORT": "TSOT", "ALBUMARTISTSORT": "TSO2", "COMPOSERSORT": "TSOC",
+    "COMPILATION": "TCMP", "ENCODERSETTINGS": "TSSE", "ORIGALBUM": "TOAL",
+    "ORIGFILENAME": "TOFN", "ORIGLYRICIST": "TOLY", "RADIOSTATION": "TRSN",
+    "FILEOWNER": "TOWN", "SETSUBTITLE": "TSST", "MOVEMENTNAME": "MVNM",
+}
+ID3_EXT_REV = {v: k for k, v in ID3_EXT.items()}
+# ID3v2.3에는 없는 프레임 (v2.3으로 저장하면 mutagen이 지운다)
+ID3_V24_ONLY = {"TMOO", "TDRL", "TSOA", "TSOP", "TSOT", "TSST", "TPRO", "TDEN", "TDTG", "TSO2", "TSOC"}
+# 화면에 따로 보이지 않는 텍스트 프레임 (다른 필드에 포함되거나 자동 관리됨)
+ID3_HIDDEN = {"TLEN", "TDTG", "TDEN", "TFLT", "TIPL", "TMCL", "TPRO", "TRSO", "TDAT", "TIME", "TYER", "TRDA", "TSIZ", "TORY"}
 
 
 def _id3_text(frame, opts: Options) -> list[str]:
@@ -136,6 +182,28 @@ def _id3_read(tags: ID3, opts: Options):
         if frame.desc == "":
             out["comment"] = _id3_text(frame, opts)
             break
+    common = set(ID3_MAP.values())
+    for frame in tags.values():
+        fid = frame.FrameID
+        if fid == "TXXX":
+            name = (frame.desc or "TXXX").upper()
+        elif fid == "USLT":
+            name = "UNSYNCEDLYRICS"
+            if name in out:
+                continue
+            text = frame.text
+            if opts.cp949_fallback and frame.encoding == 0:
+                text = _fix_cp949(text)
+            out[name] = [text]
+            continue
+        elif fid in ID3_EXT_REV:
+            name = ID3_EXT_REV[fid]
+        elif (fid.startswith("T") or fid in ("GRP1", "MVNM")) and fid not in common and fid not in ID3_HIDDEN:
+            name = fid
+        else:
+            continue
+        if hasattr(frame, "text") and name not in out:
+            out[name] = _id3_text(frame, opts)
     pics = [Picture(f.data, f.mime or guess_mime(f.data), int(f.type), f.desc)
             for f in tags.getall("APIC")]
     return out, pics
@@ -161,11 +229,32 @@ def _id3_write(tags: ID3, changes, pictures, opts: Options):
                 del tags[key]
             if vals:
                 tags.add(COMM(encoding=enc, lang="eng", desc="", text=vals))
-        else:
+        elif name in ID3_MAP:
             fid = ID3_MAP[name]
             tags.delall(fid)
             if vals:
                 tags.add(Frames[fid](encoding=enc, text=vals))
+        elif name == "UNSYNCEDLYRICS":
+            tags.delall("USLT")
+            if vals:
+                tags.add(USLT(encoding=enc, lang="eng", desc="", text="\n".join(vals)))
+        else:
+            fid = ID3_EXT.get(name) or (name if name in Frames and name[:1] in "TGM" and len(name) == 4
+                                        and name != "TXXX" else None)
+            if fid:
+                tags.delall(fid)
+            # 같은 필드가 TXXX로도 있으면 지운다 (기존 설명의 대소문자는 유지)
+            desc = name
+            for key in [k for k, f in tags.items() if f.FrameID == "TXXX" and f.desc.upper() == name]:
+                desc = tags[key].desc
+                del tags[key]
+            if not vals:
+                continue
+            if fid and not (opts.id3_v23 and fid in ID3_V24_ONLY):
+                tags.add(Frames[fid](encoding=enc, text=vals))
+            else:
+                # 사용자 정의 필드, 또는 v2.3에 없는 프레임 → TXXX
+                tags.add(TXXX(encoding=enc, desc=desc, text=vals))
     if pictures is not None:
         tags.delall("APIC")
         for p in pictures:
@@ -180,6 +269,10 @@ VORBIS_MAP = {
     "composer": "COMPOSER", "comment": "COMMENT",
 }
 VORBIS_TOTALS = {"track": ("TRACKTOTAL", "TOTALTRACKS"), "disc": ("DISCTOTAL", "TOTALDISCS")}
+VORBIS_HIDDEN = {"METADATA_BLOCK_PICTURE", "COVERART", "COVERARTMIME",
+                 "TRACKTOTAL", "TOTALTRACKS", "DISCTOTAL", "TOTALDISCS"}
+VORBIS_EXT = {"UNSYNCEDLYRICS": "LYRICS", "INITIALKEY": "KEY", "ORIGYEAR": "ORIGINALDATE"}
+VORBIS_EXT_REV = {v: k for k, v in VORBIS_EXT.items()}
 
 
 def _vorbis_read(tags):
@@ -196,12 +289,20 @@ def _vorbis_read(tags):
                 if tags.get(tk):
                     out[name] = [f"{out[name][0]}/{tags[tk][0]}"]
                     break
+    common = set(VORBIS_MAP.values())
+    for key in tags.keys():
+        k = key.upper()
+        if k in common or k in VORBIS_HIDDEN or (k == "DESCRIPTION" and "COMMENT" not in tags):
+            continue
+        name = VORBIS_EXT_REV.get(k, k)
+        if name not in out:
+            out[name] = list(tags[key])
     return out
 
 
 def _vorbis_write(tags, changes):
     for name, vals in changes.items():
-        key = VORBIS_MAP[name]
+        key = VORBIS_MAP.get(name) or VORBIS_EXT.get(name, name)
         if name in VORBIS_TOTALS:
             for tk in VORBIS_TOTALS[name]:
                 if tk in tags:
@@ -251,6 +352,22 @@ MP4_MAP = {
     "year": "©day", "genre": "©gen", "composer": "©wrt", "comment": "©cmt",
 }
 MP4_PAIRS = {"track": "trkn", "disc": "disk"}
+MP4_EXT = {
+    "UNSYNCEDLYRICS": "©lyr", "GROUPING": "©grp", "BPM": "tmpo", "COPYRIGHT": "cprt",
+    "ENCODEDBY": "©too", "ALBUMSORT": "soal", "ARTISTSORT": "soar", "TITLESORT": "sonm",
+    "ALBUMARTISTSORT": "soaa", "COMPOSERSORT": "soco", "COMPILATION": "cpil",
+    "DESCRIPTION": "desc", "WORK": "©wrk", "MOVEMENTNAME": "©mvn",
+}
+MP4_EXT_REV = {v: k for k, v in MP4_EXT.items()}
+FREEFORM = "----:com.apple.iTunes:"
+
+
+def _mp4_str(v) -> str:
+    if isinstance(v, bool):
+        return "1" if v else "0"
+    if isinstance(v, (bytes, bytearray)):
+        return bytes(v).decode("utf-8", "replace")
+    return str(v)
 
 
 def _pair_to_str(pair) -> str:
@@ -282,6 +399,16 @@ def _mp4_read(tags):
             s = _pair_to_str(tags[key][0])
             if s:
                 out[name] = [s]
+    for key, vals in tags.items():
+        if key in MP4_EXT_REV:
+            name = MP4_EXT_REV[key]
+        elif key.startswith(FREEFORM):
+            name = key[len(FREEFORM):].upper()
+        else:
+            continue
+        if name not in out:
+            seq = vals if isinstance(vals, list) else [vals]
+            out[name] = [_mp4_str(v) for v in seq]
     pics = []
     for c in tags.get("covr", []):
         mime = "image/png" if c.imageformat == MP4Cover.FORMAT_PNG else guess_mime(bytes(c))
@@ -297,13 +424,34 @@ def _mp4_write(tags, changes, pictures):
             pair = _str_to_pair(vals[0]) if vals else None
             if pair and any(pair):
                 tags[key] = [pair]
-        else:
+        elif name in MP4_MAP:
             key = MP4_MAP[name]
             tags.pop(key, None)
             if name == "genre":
                 tags.pop("gnre", None)
             if vals:
                 tags[key] = vals
+        elif name in MP4_EXT:
+            key = MP4_EXT[name]
+            tags.pop(key, None)
+            if not vals:
+                continue
+            if key == "tmpo":
+                try:
+                    tags[key] = [int(float(vals[0]))]
+                except ValueError:
+                    pass
+            elif key == "cpil":
+                tags[key] = vals[0].strip().lower() in ("1", "true", "yes")
+            else:
+                tags[key] = vals
+        else:
+            key = FREEFORM + name
+            for k in [k for k in tags.keys() if k.startswith(FREEFORM) and k[len(FREEFORM):].upper() == name]:
+                key = k
+                del tags[k]
+            if vals:
+                tags[key] = [MP4FreeForm(v.encode("utf-8")) for v in vals]
     if pictures is not None:
         tags.pop("covr", None)
         if pictures:
@@ -331,6 +479,15 @@ def _ape_read(tags):
                 out[name] = list(tags[key])
             except TypeError:
                 pass
+    common = {v.lower() for v in APE_MAP.values()}
+    for key, value in tags.items():
+        if key.lower() in common or isinstance(value, APEBinaryValue):
+            continue
+        name = "UNSYNCEDLYRICS" if key.upper() == "LYRICS" else key.upper()
+        try:
+            out.setdefault(name, list(value))
+        except TypeError:
+            pass
     for key, value in tags.items():
         if key.lower().startswith("cover art") and isinstance(value, APEBinaryValue):
             raw = bytes(value.value)
@@ -342,8 +499,8 @@ def _ape_read(tags):
 
 def _ape_write(tags, changes, pictures):
     for name, vals in changes.items():
-        key = APE_MAP[name]
-        if key in tags:
+        key = APE_MAP.get(name) or ("Lyrics" if name == "UNSYNCEDLYRICS" else name)
+        if key in tags:  # APE 키는 대소문자를 구분하지 않는다
             del tags[key]
         if vals:
             tags[key] = vals
@@ -364,6 +521,17 @@ ASF_MAP = {
     "disc": "WM/PartOfSet", "genre": "WM/Genre", "composer": "WM/Composer",
     "comment": "Description",
 }
+
+
+ASF_EXT = {
+    "UNSYNCEDLYRICS": "WM/Lyrics", "PUBLISHER": "WM/Publisher", "BPM": "WM/BeatsPerMinute",
+    "COPYRIGHT": "Copyright", "ENCODEDBY": "WM/EncodedBy", "CONDUCTOR": "WM/Conductor",
+    "ISRC": "WM/ISRC", "MOOD": "WM/Mood", "CONTENTGROUP": "WM/ContentGroupDescription",
+    "SUBTITLE": "WM/SubTitle", "LYRICIST": "WM/Writer", "ALBUMSORT": "WM/AlbumSortOrder",
+    "ARTISTSORT": "WM/ArtistSortOrder", "TITLESORT": "WM/TitleSortOrder",
+    "INITIALKEY": "WM/InitialKey", "LANGUAGE": "WM/Language",
+}
+ASF_EXT_REV = {v.lower(): k for k, v in ASF_EXT.items()}
 
 
 def _asf_parse_pic(b: bytes):
@@ -397,6 +565,14 @@ def _asf_read(tags):
         if key in tags:
             # 같은 값이 ASF 헤더의 두 곳에 중복 저장되는 경우가 있다
             out[name] = list(dict.fromkeys(str(v) for v in tags[key]))
+    common = {v.lower() for v in ASF_MAP.values()}
+    for key in dict.fromkeys(k for k, _ in tags):
+        if key.lower() in common or key == "WM/Picture":
+            continue
+        name = ASF_EXT_REV.get(key.lower(), key.upper())
+        vals = [v for v in tags[key] if not isinstance(v.value, (bytes, bytearray))]
+        if vals and name not in out:
+            out[name] = list(dict.fromkeys(str(v) for v in vals))
     pics = []
     for v in tags.get("WM/Picture", []):
         try:
@@ -408,7 +584,9 @@ def _asf_read(tags):
 
 def _asf_write(tags, changes, pictures):
     for name, vals in changes.items():
-        key = ASF_MAP[name]
+        key = ASF_MAP.get(name) or ASF_EXT.get(name)
+        if key is None:
+            key = next((k for k, _ in tags if k.upper() == name), name)
         if key in tags:
             del tags[key]
         if vals:
