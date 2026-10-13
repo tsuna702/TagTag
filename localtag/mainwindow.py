@@ -701,24 +701,45 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Music 작업이 이미 진행 중입니다.", 4000)
             return
         self._music_busy = True
+        # Music에 보여야 할 값 (제목·앨범) — 반영됐는지 확인하는 데 쓴다
+        by_path = {f.path: f for f in self.model.files}
+        expected = {p: (by_path[p].get("title").split("\\\\")[0], by_path[p].get("album").split("\\\\")[0])
+                    for p in paths if p in by_path}
 
         def done(res):
             self._music_busy = False
-            (total, refreshed, skipped, failed), relocated, warnings = res
-            moved = self._relink(relocated)
-            msg = f"Music에 반영: {refreshed}곡 새로 읽음"
-            if skipped:
-                msg += f" · 보관함에 없음 {skipped}곡"
-            if failed:
-                msg += f" · 실패 {failed}곡"
+            moved = self._relink(res.relocated)
+            parts = [f"반영 확인됨 {res.confirmed}곡"]
+            if res.unconfirmed:
+                parts.append(f"Music에 아직 옛 정보가 보임 {len(res.unconfirmed)}곡")
+            if res.notfound:
+                parts.append(f"Music 보관함에 없음 {len(res.notfound)}곡")
+            if res.failed:
+                parts.append(f"실패 {len(res.failed)}곡")
             if moved:
-                msg += f" · 옮겨진 파일 {moved}개 다시 연결"
-            self.statusBar().showMessage(msg, 8000)
-            if modal:
-                text = msg.replace(" · ", "\n")
-                if warnings:
-                    text += "\n\n경로 확인 경고:\n" + "\n".join(warnings[:5])
-                QMessageBox.information(self, "Apple Music", text)
+                parts.append(f"옮겨진 파일 {moved}개 다시 연결")
+            self.statusBar().showMessage("Music: " + " · ".join(parts), 10000)
+            if not modal and not (res.unconfirmed or res.failed):
+                return
+            text = "\n".join(parts)
+            if res.retried:
+                text += f"\n\n(늦게 반영되는 곡이 있어 {res.retried}번 다시 시도했습니다)"
+            details = []
+            if res.unconfirmed:
+                details.append("아직 옛 정보가 보이는 곡 — Music이 늦게 반영하는 중일 수 있습니다. "
+                               "잠시 뒤 다시 'Music에 반영'을 눌러 보세요:")
+                details += ["  " + os.path.basename(p) for p in res.unconfirmed[:10]]
+            if res.notfound:
+                details.append("Music 보관함에 없는 파일 (Music에 추가된 파일이 아니거나 다른 사본):")
+                details += ["  " + os.path.basename(p) for p in res.notfound[:10]]
+            if res.failed:
+                details.append("실패:")
+                details += [f"  {os.path.basename(p)}: {why}" for p, why in res.failed[:10]]
+            box = QMessageBox(QMessageBox.Warning if (res.unconfirmed or res.failed) else QMessageBox.Information,
+                              "Apple Music", text, QMessageBox.Ok, self)
+            if details:
+                box.setDetailedText("\n".join(details))
+            box.exec()
 
         def fail(msg):
             self._music_busy = False
@@ -727,7 +748,8 @@ class MainWindow(QMainWindow):
             else:
                 self.statusBar().showMessage(f"Music 자동 반영 실패: {msg}", 8000)
 
-        run_task(self, "Apple Music에 반영", lambda prog, cancelled: music.refresh(paths, prog, cancelled),
+        run_task(self, "Apple Music에 반영",
+                 lambda prog, cancelled: music.refresh(paths, prog, cancelled, expected),
                  done, fail, modal=modal, status=lambda m: self.statusBar().showMessage(m, 3000))
 
     def _music_error(self, msg):

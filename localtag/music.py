@@ -25,59 +25,87 @@ class MusicError(Exception):
 PERMISSION_HELP = ("Music 제어 권한이 필요합니다. 시스템 설정 → 개인정보 보호 및 보안 → 자동화에서 "
                    "LocalTag(또는 터미널) 아래의 'Music'을 켜 주세요.")
 
+# 곡마다 결과를 한 줄씩 log 로 알려 준다:  LOCALTAG_RESULT:<경로>\t<상태>\t<persistent ID>
+#   상태: ok / notfound / refresh-error <번호> / error <번호>
+# Music은 refresh 를 늦게 처리하는 경우가 많아, 곡 사이에 쉬고 시간 제한을 넉넉히 둔다.
 REFRESH_SCRIPT = '''
-use framework "Foundation"
-use scripting additions
-on recordPath(pathMappings, oldPath, stableID, newPath, mappingFile)
-    pathMappings's setObject:({stableID as text, newPath as text}) forKey:(oldPath as text)
-    set saved to pathMappings's writeToFile:mappingFile atomically:true
-    if not saved then error "경로 연결 정보를 저장하지 못했습니다."
-end recordPath
-on run arguments
-    set mappingFile to item 1 of arguments
-    set wantedPaths to rest of arguments
-    set pathMappings to current application's NSMutableDictionary's dictionary()
+on run wantedPaths
     tell application "Music"
         if not running then error "Apple Music을 먼저 열어 주세요."
-        set selectedCount to count of wantedPaths
-        set refreshedCount to 0
-        set skippedCount to 0
-        set failedCount to 0
-        set completedCount to 0
-        repeat with wantedPath in wantedPaths
-            log "LOCALTAG_PROGRESS:" & completedCount
-            try
-                set wantedFile to (POSIX file (contents of wantedPath)) as alias
-                with timeout of 30 seconds
-                    set matches to get (every file track of library playlist 1 whose location is wantedFile)
+    end tell
+    set i to 0
+    repeat with wantedPath in wantedPaths
+        set p to contents of wantedPath
+        set resultLine to p & tab & "error" & tab & ""
+        try
+            set f to (POSIX file p) as alias
+            tell application "Music"
+                with timeout of 90 seconds
+                    set matches to (every file track of library playlist 1 whose location is f)
                 end timeout
                 if (count of matches) is 0 then
-                    set skippedCount to skippedCount + 1
+                    set resultLine to p & tab & "notfound" & tab & ""
                 else
-                    with timeout of 15 seconds
-                        set stableID to get persistent ID of item 1 of matches
-                        refresh item 1 of matches
-                    end timeout
-                    set refreshedCount to refreshedCount + 1
+                    set t to item 1 of matches
+                    set pid to persistent ID of t
+                    set resultLine to p & tab & "sent" & tab & pid
                     try
-                        with timeout of 15 seconds
-                            set stableTrack to get first file track of library playlist 1 whose persistent ID is stableID
-                            set newPath to POSIX path of (get location of stableTrack)
+                        with timeout of 90 seconds
+                            refresh t
                         end timeout
-                        my recordPath(pathMappings, contents of wantedPath, stableID, newPath, mappingFile)
-                    on error pathError number pathErrorNumber
-                        log "LOCALTAG_PATH_WARNING:" & pathErrorNumber & ": " & pathError
+                        set resultLine to p & tab & "ok" & tab & pid
+                    on error errText number errNum
+                        if errNum is -1743 then error errText number errNum
+                        set resultLine to p & tab & "refresh-error " & errNum & tab & pid
                     end try
                 end if
-            on error errorText number errorNumber
-                if errorNumber is -1743 then error errorText number errorNumber
-                set failedCount to failedCount + 1
+            end tell
+        on error errText number errNum
+            if errNum is -1743 then error errText number errNum
+            set resultLine to p & tab & "error " & errNum & tab & ""
+        end try
+        set i to i + 1
+        log "LOCALTAG_RESULT:" & resultLine
+        log "LOCALTAG_PROGRESS:" & i
+        delay 0.25
+    end repeat
+    return "DONE"
+end run
+'''
+
+# persistent ID 로 곡을 찾아 현재 Music에 보이는 정보를 읽거나(read), 다시 새로 읽게 한다(refresh).
+#   LOCALTAG_INFO:<pid>\t<제목>\t<앨범>\t<경로>
+ID_SCRIPT = '''
+on run arguments
+    set mode to item 1 of arguments
+    set ids to rest of arguments
+    set i to 0
+    tell application "Music"
+        repeat with pidRef in ids
+            set pid to contents of pidRef
+            try
+                with timeout of 60 seconds
+                    set t to first file track of library playlist 1 whose persistent ID is pid
+                    if mode is "refresh" then
+                        refresh t
+                        delay 0.25
+                    end if
+                    set loc to ""
+                    try
+                        set loc to POSIX path of (get location of t)
+                    end try
+                    set infoLine to pid & tab & (name of t as text) & tab & (album of t as text) & tab & loc
+                end timeout
+                log "LOCALTAG_INFO:" & infoLine
+            on error errText number errNum
+                if errNum is -1743 then error errText number errNum
+                log "LOCALTAG_INFO:" & pid & tab & "" & tab & "" & tab & "" & tab & "error " & errNum
             end try
-            set completedCount to completedCount + 1
-            log "LOCALTAG_PROGRESS:" & completedCount
+            set i to i + 1
+            log "LOCALTAG_PROGRESS:" & i
         end repeat
-        return (selectedCount as text) & "," & (refreshedCount as text) & "," & (skippedCount as text) & "," & (failedCount as text)
     end tell
+    return "DONE"
 end run
 '''
 
@@ -175,13 +203,12 @@ def open_privacy_settings():
                     "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation"], check=False)
 
 
-def _run_batch(paths, progress, cancelled, relocated, warnings):
-    with tempfile.TemporaryFile() as out, tempfile.NamedTemporaryFile() as errs, \
-            tempfile.NamedTemporaryFile(suffix=".plist") as mapping:
-        proc = subprocess.Popen(["/usr/bin/osascript", "-e", REFRESH_SCRIPT, "--", mapping.name, *paths],
-                                stdout=out, stderr=errs)
+def _run_script(script, args, progress, cancelled, idle_limit=240):
+    """osascript 를 돌리면서 log 줄을 실시간으로 읽는다. (log 줄 목록) 을 돌려준다."""
+    with tempfile.TemporaryFile() as out, tempfile.NamedTemporaryFile() as errs:
+        proc = subprocess.Popen(["/usr/bin/osascript", "-e", script, "--", *args], stdout=out, stderr=errs)
         reader = open(errs.name, "rb")
-        offset, pending, diag = 0, b"", []
+        offset, pending, lines = 0, b"", []
         last = time.monotonic()
         try:
             while True:
@@ -190,73 +217,132 @@ def _run_batch(paths, progress, cancelled, relocated, warnings):
                 offset += len(data)
                 pending += data
                 while b"\n" in pending:
-                    line, pending = pending.split(b"\n", 1)
-                    text = line.decode("utf-8", "replace")
+                    raw, pending = pending.split(b"\n", 1)
+                    text = raw.decode("utf-8", "replace")
                     m = re.search(r"LOCALTAG_PROGRESS:(\d+)", text)
                     if m:
                         progress(int(m[1]))
                         last = time.monotonic()
-                    elif "LOCALTAG_PATH_WARNING:" in text:
-                        warnings.append(text.split("LOCALTAG_PATH_WARNING:", 1)[1])
                     else:
-                        diag.append(text)
+                        lines.append(text)
                 if proc.poll() is not None:
                     reader.seek(offset)
                     if reader.read():
                         continue
                     break
                 if cancelled():
-                    raise MusicError("취소했습니다. 일부 곡은 이미 새로 읽었을 수 있습니다.")
-                if time.monotonic() - last > 180:
-                    raise MusicError("Music의 응답 시간이 초과되었습니다. 일부 곡은 이미 새로 읽었을 수 있습니다.")
+                    raise MusicError("취소했습니다. 일부 곡은 이미 반영됐을 수 있습니다.")
+                if time.monotonic() - last > idle_limit:
+                    raise MusicError("Music이 오래 응답하지 않습니다. 일부 곡은 이미 반영됐을 수 있습니다.")
                 time.sleep(0.1)
         finally:
             if proc.poll() is None:
                 proc.kill()
             proc.wait()
             reader.close()
+        if pending:
+            lines.append(pending.decode("utf-8", "replace"))
         if proc.returncode:
-            detail = "\n".join(diag) + pending.decode("utf-8", "replace")
+            detail = "\n".join(l for l in lines if "LOCALTAG_" not in l)
             if "-1743" in detail:
                 raise MusicError(PERMISSION_HELP)
-            raise MusicError("Music 새로고침을 끝내지 못했습니다.\n" + detail)
-        if os.path.getsize(mapping.name):
-            with open(mapping.name, "rb") as f:
-                for old, value in plistlib.load(f).items():
-                    if old in paths and isinstance(value, list) and len(value) == 2 and value[1].startswith("/"):
-                        relocated[old] = value[1]
-        out.seek(0)
-        try:
-            counts = tuple(int(x) for x in out.read().decode().strip().split(","))
-            if len(counts) != 4:
-                raise ValueError
-        except ValueError as e:
-            raise MusicError("Music의 응답을 확인하지 못했습니다.") from e
-        return counts
+            if "-600" in detail or "먼저 열어" in detail:
+                raise MusicError("Apple Music을 먼저 열어 주세요.")
+            raise MusicError("Music 작업을 끝내지 못했습니다.\n" + detail.strip())
+        return lines
 
 
-def refresh(paths, progress=lambda *_: None, cancelled=lambda: False):
-    """바꾼 파일을 Music에서 다시 읽게 한다.
-    반환: ((선택, 새로 읽음, 보관함에 없음, 실패), {옛 경로: 새 경로}, 경고 목록)"""
+def _tagged(lines, marker):
+    return [l.split(marker, 1)[1].split("\t") for l in lines if marker in l]
+
+
+def _norm(s):
+    return unicodedata.normalize("NFC", (s or "").strip()).casefold()
+
+
+class RefreshResult:
+    def __init__(self, total):
+        self.total = total
+        self.confirmed = 0      # Music에 새 정보가 보이는 것까지 확인
+        self.unconfirmed = []   # 명령은 보냈지만 Music에 아직 옛 정보가 보임
+        self.notfound = []      # Music 보관함에 없는 파일
+        self.failed = []        # (파일, 이유)
+        self.relocated = {}     # 옛 경로 → Music이 옮긴 새 경로
+        self.retried = 0
+
+
+def refresh(paths, progress=lambda *_: None, cancelled=lambda: False, expected=None, rounds=3):
+    """바꾼 파일을 Music에서 다시 읽게 하고, 실제로 반영됐는지 확인한다.
+
+    expected: {경로: (제목, 앨범)} — 주어지면 Music에 보이는 값과 비교해 확인하고,
+              다르면 잠시 기다렸다가 최대 rounds 번 다시 반영한다.
+    """
     paths = list(dict.fromkeys(os.path.realpath(p) for p in paths))
     if not paths:
         raise MusicError("Music에 반영할 곡을 선택해 주세요.")
+    expected = {os.path.realpath(k): v for k, v in (expected or {}).items()}
     total = len(paths)
+    res = RefreshResult(total)
     progress(0, total, "Music 권한 확인 중 · 권한 창이 뜨면 허용해 주세요")
     ensure_access()
-    result = [total, 0, 0, 0]
-    relocated, warnings = {}, []
-    for start in range(0, total, 50):  # 명령줄 길이 제한
-        batch = paths[start:start + 50]
+
+    pid_of = {}
+    for start in range(0, total, 40):  # 명령줄 길이 제한
+        batch = paths[start:start + 40]
 
         def report(cur, start=start, batch=batch):
             name = os.path.basename(batch[min(cur, len(batch) - 1)])
-            progress(start + cur, total, "Music에서 새로 읽는 중 · " + name)
-        report(0)
-        counts = _run_batch(batch, report, cancelled, relocated, warnings)
-        for i in range(1, 4):
-            result[i] += counts[i]
-    return tuple(result), relocated, warnings
+            progress(start + cur, total, f"Music에서 새로 읽는 중 ({start + cur}/{total}) · {name}")
+        lines = _run_script(REFRESH_SCRIPT, batch, report, cancelled)
+        for parts in _tagged(lines, "LOCALTAG_RESULT:"):
+            if len(parts) < 3:
+                continue
+            path, status, pid = parts[0], parts[1], parts[2]
+            if status == "notfound":
+                res.notfound.append(path)
+            elif pid:
+                pid_of[path] = pid   # ok 이거나, 시간 초과처럼 보여도 실제로는 처리됐을 수 있음
+            else:
+                res.failed.append((path, f"Music에서 곡을 찾는 중 오류 ({status})"))
+
+    # ---- 확인과 재시도
+    pending = dict(pid_of)
+    for rnd in range(rounds + 1):
+        if not pending or cancelled():
+            break
+        time.sleep(1.5 if rnd == 0 else 2.5)  # Music이 파일을 다시 읽을 시간
+        mode = "read" if rnd == 0 else "refresh"
+        msg = "Music에 반영됐는지 확인하는 중" if rnd == 0 else f"아직 옛 정보인 곡 다시 반영 ({rnd}/{rounds})"
+        ids = list(pending.values())
+        lines = _run_script(ID_SCRIPT, [mode, *ids],
+                            lambda cur, n=len(ids), msg=msg: progress(cur, n, msg), cancelled)
+        info = {p[0]: p for p in _tagged(lines, "LOCALTAG_INFO:") if p}
+        if rnd:
+            res.retried += len(ids)
+        still = {}
+        for path, pid in pending.items():
+            row = info.get(pid)
+            if row is None or len(row) < 4 or (len(row) > 4 and row[4].startswith("error")):
+                still[path] = pid
+                continue
+            _, name, album, loc = row[:4]
+            if loc and os.path.realpath(loc) != path:
+                res.relocated[path] = loc
+            want = expected.get(path)
+            ok = True
+            if want:
+                title, want_album = want
+                if title and _norm(name) != _norm(title):
+                    ok = False
+                if want_album and _norm(album) != _norm(want_album):
+                    ok = False
+            if ok:
+                res.confirmed += 1
+            else:
+                still[path] = pid
+        pending = still
+    res.unconfirmed = list(pending)
+    return res
 
 
 def selected_paths():
