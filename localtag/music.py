@@ -185,6 +185,33 @@ def ensure_access(launch=False):
         raise MusicError("Music 접근 확인에 실패했습니다.")
 
 
+def automation_status() -> str:
+    """권한 창을 띄우지 않고 'Music 제어' 권한 상태를 확인한다.
+    'granted' / 'denied' / 'ask' (아직 묻지 않음) / 'unknown' (Music이 꺼져 있는 등)"""
+    try:
+        cs = ctypes.cdll.LoadLibrary("/System/Library/Frameworks/CoreServices.framework/CoreServices")
+
+        class AEDesc(ctypes.Structure):
+            _fields_ = [("descriptorType", ctypes.c_uint32), ("dataHandle", ctypes.c_void_p)]
+
+        def fourcc(s):
+            return int.from_bytes(s.encode("ascii"), "big")
+        bundle = b"com.apple.Music"
+        target = AEDesc()
+        cs.AECreateDesc.argtypes = [ctypes.c_uint32, ctypes.c_void_p, ctypes.c_long, ctypes.POINTER(AEDesc)]
+        if cs.AECreateDesc(fourcc("bund"), bundle, len(bundle), ctypes.byref(target)):
+            return "unknown"
+        fn = cs.AEDeterminePermissionToAutomateTarget
+        fn.argtypes = [ctypes.POINTER(AEDesc), ctypes.c_uint32, ctypes.c_uint32, ctypes.c_ubyte]
+        fn.restype = ctypes.c_int32
+        status = fn(ctypes.byref(target), fourcc("****"), fourcc("****"), 0)
+        cs.AEDisposeDesc.argtypes = [ctypes.POINTER(AEDesc)]
+        cs.AEDisposeDesc(ctypes.byref(target))
+    except Exception:
+        return "unknown"
+    return {0: "granted", -1743: "denied", -1744: "ask"}.get(status, "unknown")
+
+
 def open_privacy_settings():
     subprocess.run(["/usr/bin/open",
                     "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation"], check=False)
