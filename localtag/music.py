@@ -25,10 +25,9 @@ class MusicError(Exception):
 PERMISSION_HELP = ("Music 제어 권한이 필요합니다. 시스템 설정 → 개인정보 보호 및 보안 → 자동화에서 "
                    "LocalTag(또는 터미널) 아래의 'Music'을 켜 주세요.")
 
-# 곡마다 결과를 한 줄씩 log 로 알려 준다:  LOCALTAG_RESULT:<경로>\t<상태>\t<persistent ID>
-#   상태: ok / notfound / refresh-error <번호> / error <번호>
-# Music은 refresh 를 늦게 처리하는 경우가 많아, 곡 사이에 쉬고 시간 제한을 넉넉히 둔다.
-REFRESH_SCRIPT = '''
+# 1단계: 경로로 곡을 찾아 persistent ID 만 얻는다 (아직 새로 읽기는 하지 않으므로 파일이 움직이지 않는다).
+#   LOCALTAG_RESULT:<경로>\t<found|notfound|error 번호>\t<persistent ID>
+LOOKUP_SCRIPT = '''
 on run wantedPaths
     tell application "Music"
         if not running then error "Apple Music을 먼저 열어 주세요."
@@ -46,18 +45,7 @@ on run wantedPaths
                 if (count of matches) is 0 then
                     set resultLine to p & tab & "notfound" & tab & ""
                 else
-                    set t to item 1 of matches
-                    set pid to persistent ID of t
-                    set resultLine to p & tab & "sent" & tab & pid
-                    try
-                        with timeout of 90 seconds
-                            refresh t
-                        end timeout
-                        set resultLine to p & tab & "ok" & tab & pid
-                    on error errText number errNum
-                        if errNum is -1743 then error errText number errNum
-                        set resultLine to p & tab & "refresh-error " & errNum & tab & pid
-                    end try
+                    set resultLine to p & tab & "found" & tab & (persistent ID of item 1 of matches)
                 end if
             end tell
         on error errText number errNum
@@ -67,7 +55,6 @@ on run wantedPaths
         set i to i + 1
         log "LOCALTAG_RESULT:" & resultLine
         log "LOCALTAG_PROGRESS:" & i
-        delay 0.25
     end repeat
     return "DONE"
 end run
@@ -264,99 +251,128 @@ class RefreshResult:
     def __init__(self, total):
         self.total = total
         self.confirmed = 0      # Music에 새 정보가 보이는 것까지 확인
-        self.unconfirmed = []   # 명령은 보냈지만 Music에 아직 옛 정보가 보임
+        self.unconfirmed = []   # 명령은 보냈지만 Music에 아직 옛 정보가 보임 (처음 받은 경로)
         self.notfound = []      # Music 보관함에 없는 파일
-        self.failed = []        # (파일, 이유)
-        self.relocated = {}     # 옛 경로 → Music이 옮긴 새 경로
+        self.failed = []        # (처음 받은 경로, 이유)
+        self.relocated = {}     # 처음 받은 경로 → 지금 경로 (옮겨진 경우만)
         self.retried = 0
 
 
-def refresh(paths, progress=lambda *_: None, cancelled=lambda: False, expected=None, rounds=3):
+def _lookup(cur, keys, progress, cancelled):
+    """keys 의 곡을 지금 경로(cur[key])로 찾는다. → ({key: pid}, {key: 'notfound'|'error ..'})"""
+    by_path = {}
+    for k in keys:
+        by_path.setdefault(cur[k], []).append(k)
+    paths = list(by_path)
+    pids, bad = {}, {}
+    for start in range(0, len(paths), 40):  # 명령줄 길이 제한
+        batch = paths[start:start + 40]
+
+        def report(n, start=start, batch=batch, total=len(paths)):
+            name = os.path.basename(batch[min(n, len(batch) - 1)])
+            progress(start + n, total, f"Music에서 곡 찾는 중 ({start + n}/{total}) · {name}")
+        lines = _run_script(LOOKUP_SCRIPT, batch, report, cancelled)
+        seen = set()
+        for parts in _tagged(lines, "LOCALTAG_RESULT:"):
+            if len(parts) < 3 or parts[0] not in by_path:
+                continue
+            path, status, pid = parts[0], parts[1], parts[2]
+            seen.add(path)
+            for k in by_path[path]:
+                if pid:
+                    pids[k] = pid
+                else:
+                    bad[k] = status
+        for path in batch:
+            if path not in seen:
+                for k in by_path[path]:
+                    bad[k] = "응답 없음"
+    return pids, bad
+
+
+def refresh(paths, progress=lambda *_: None, cancelled=lambda: False, expected=None, rounds=3,
+            relocate=None):
     """바꾼 파일을 Music에서 다시 읽게 하고, 실제로 반영됐는지 확인한다.
 
-    expected: {경로: (제목, 앨범)} — 주어지면 Music에 보이는 값과 비교해 확인하고,
-              다르면 잠시 기다렸다가 최대 rounds 번 다시 반영한다.
+    1) 경로로 곡을 모두 찾아 persistent ID 를 얻는다 (아직 아무것도 반영하지 않음)
+    2) persistent ID 로 새로 읽게 한다 — Music이 반영하면서 파일·폴더를 옮겨도 놓치지 않는다
+    3) Music에 보이는 제목·앨범을 expected 와 비교하고, 다르면 잠시 뒤 다시 반영한다
+
+    expected: {경로: (제목, 앨범)}
+    relocate: 옮겨진 파일의 새 경로를 찾는 함수 ([경로] → {옛 경로: 새 경로}). 찾기 재시도 전에 부른다.
     """
-    paths = list(dict.fromkeys(os.path.realpath(p) for p in paths))
-    if not paths:
+    keys = list(dict.fromkeys(os.path.realpath(p) for p in paths))
+    if not keys:
         raise MusicError("Music에 반영할 곡을 선택해 주세요.")
     expected = {os.path.realpath(k): v for k, v in (expected or {}).items()}
-    total = len(paths)
-    res = RefreshResult(total)
-    progress(0, total, "Music 권한 확인 중 · 권한 창이 뜨면 허용해 주세요")
+    cur = {k: k for k in keys}
+    res = RefreshResult(len(keys))
+    progress(0, len(keys), "Music 권한 확인 중 · 권한 창이 뜨면 허용해 주세요")
     ensure_access()
 
-    pid_of = {}
-    errors = {}
-    todo = list(paths)
-    # 저장 직후에는 Music이 곡 위치를 다시 확인하는 동안 잠깐 찾지 못할 수 있다 (-10001, -1700 등).
-    # 찾지 못한 곡만 잠시 기다렸다가 다시 찾는다.
+    # ---- 1) 찾기 (실패하면 새 위치를 확인하고 잠시 뒤 다시)
+    pid_of, bad = {}, {}
+    todo = list(keys)
     for attempt in range(3):
         if not todo or cancelled():
             break
         if attempt:
+            if relocate:
+                moved = relocate([cur[k] for k in todo]) or {}
+                for k in todo:
+                    if cur[k] in moved:
+                        cur[k] = moved[cur[k]]
             wait = 2.0 * attempt
             progress(0, len(todo), f"Music이 곡을 찾지 못해 {wait:.0f}초 뒤 다시 찾습니다 ({len(todo)}곡)")
             time.sleep(wait)
+        pids, errs = _lookup(cur, todo, progress, cancelled)
+        pid_of.update(pids)
+        for k in pids:
+            bad.pop(k, None)
         retry = []
-        for start in range(0, len(todo), 40):  # 명령줄 길이 제한
-            batch = todo[start:start + 40]
-
-            def report(cur, start=start, batch=batch, n=len(todo)):
-                name = os.path.basename(batch[min(cur, len(batch) - 1)])
-                progress(start + cur, n, f"Music에서 새로 읽는 중 ({start + cur}/{n}) · {name}")
-            lines = _run_script(REFRESH_SCRIPT, batch, report, cancelled)
-            reported = set()
-            for parts in _tagged(lines, "LOCALTAG_RESULT:"):
-                if len(parts) < 3:
-                    continue
-                path, status, pid = parts[0], parts[1], parts[2]
-                reported.add(path)
-                if status == "notfound":
-                    res.notfound.append(path)
-                elif pid:
-                    pid_of[path] = pid   # ok 이거나, 시간 초과처럼 보여도 실제로는 처리됐을 수 있음
-                    errors.pop(path, None)
-                else:
-                    errors[path] = status
-                    retry.append(path)
-            for path in batch:
-                if path not in reported:
-                    errors[path] = "응답 없음"
-                    retry.append(path)
-        todo = retry
-    for path, status in errors.items():
-        if path not in pid_of:
-            if not os.path.exists(path):
-                why = "파일이 옮겨졌거나 지워졌습니다. 목록을 새로 고침(F5)해 보세요"
+        for k, status in errs.items():
+            if status == "notfound" and os.path.exists(cur[k]):
+                res.notfound.append(k)
             else:
-                why = f"Music에서 곡을 찾지 못했습니다 ({status})"
-            res.failed.append((path, why))
+                bad[k] = status
+                retry.append(k)
+        todo = retry
+    for k, status in bad.items():
+        if not os.path.exists(cur[k]):
+            why = "파일이 옮겨졌거나 지워졌습니다. 목록을 새로 고침(F5)해 보세요"
+        else:
+            why = f"Music에서 곡을 찾지 못했습니다 ({status})"
+        res.failed.append((k, why))
 
-    # ---- 확인과 재시도
+    # ---- 2) 새로 읽기 · 3) 확인과 재시도 (모두 persistent ID 로)
     pending = dict(pid_of)
-    for rnd in range(rounds + 1):
+    for rnd in range(rounds + 2):
         if not pending or cancelled():
             break
-        time.sleep(1.5 if rnd == 0 else 2.5)  # Music이 파일을 다시 읽을 시간
-        mode = "read" if rnd == 0 else "refresh"
-        msg = "Music에 반영됐는지 확인하는 중" if rnd == 0 else f"아직 옛 정보인 곡 다시 반영 ({rnd}/{rounds})"
-        ids = list(pending.values())
+        if rnd == 0:
+            mode, msg = "refresh", "Music에서 새로 읽는 중"
+        else:
+            time.sleep(1.5 if rnd == 1 else 2.5)  # Music이 파일을 다시 읽을 시간
+            mode = "read" if rnd == 1 else "refresh"
+            msg = "Music에 반영됐는지 확인하는 중" if rnd == 1 else f"아직 옛 정보인 곡 다시 반영 ({rnd - 1}/{rounds})"
+        ids = list(dict.fromkeys(pending.values()))
         lines = _run_script(ID_SCRIPT, [mode, *ids],
-                            lambda cur, n=len(ids), msg=msg: progress(cur, n, msg), cancelled)
-        info = {p[0]: p for p in _tagged(lines, "LOCALTAG_INFO:") if p}
-        if rnd:
+                            lambda n, total=len(ids), msg=msg: progress(n, total, f"{msg} ({n}/{total})"), cancelled)
+        if rnd == 0:
+            continue  # 새로 읽기 직후 정보는 아직 옛것일 수 있으므로 확인은 다음 단계에서
+        if rnd >= 2:
             res.retried += len(ids)
+        info = {p[0]: p for p in _tagged(lines, "LOCALTAG_INFO:") if p}
         still = {}
-        for path, pid in pending.items():
+        for k, pid in pending.items():
             row = info.get(pid)
             if row is None or len(row) < 4 or (len(row) > 4 and row[4].startswith("error")):
-                still[path] = pid
+                still[k] = pid
                 continue
             _, name, album, loc = row[:4]
-            if loc and os.path.realpath(loc) != path:
-                res.relocated[path] = loc
-            want = expected.get(path)
+            if loc:
+                cur[k] = loc
+            want = expected.get(k)
             ok = True
             if want:
                 title, want_album = want
@@ -367,9 +383,10 @@ def refresh(paths, progress=lambda *_: None, cancelled=lambda: False, expected=N
             if ok:
                 res.confirmed += 1
             else:
-                still[path] = pid
+                still[k] = pid
         pending = still
     res.unconfirmed = list(pending)
+    res.relocated = {k: v for k, v in cur.items() if os.path.realpath(v) != k}
     return res
 
 

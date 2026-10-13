@@ -775,22 +775,34 @@ class MainWindow(QMainWindow):
 
         entries = [(p, by_path[p].dev, by_path[p].ino) for p in paths if p in by_path]
 
+        inode = {os.path.realpath(p): (dev, ino) for p, dev, ino in entries}
+
+        def relocate(ps):
+            # 처음 경로의 파일 번호로 지금 위치를 찾는다
+            found = find_moved([(p, *inode.get(os.path.realpath(p), (0, 0))) for p in ps])
+            return found
+
         def job(prog, cancelled):
             prog(0, len(paths), "옮겨진 파일이 있는지 확인하는 중")
-            moved = find_moved(entries, cancelled)          # 옛 경로 → 지금 경로
+            moved = find_moved(entries, cancelled)          # 반영 전에 이미 옮겨진 파일
             now = [moved.get(p, p) for p in paths]
+            for p in paths:
+                if p in moved:
+                    inode[os.path.realpath(moved[p])] = inode.get(os.path.realpath(p), (0, 0))
             exp = {moved.get(p, p): v for p, v in expected.items()}
-            res = music.refresh(now, prog, cancelled, exp)
-            # 목록의 옛 경로 → 최종 경로 (Music이 반영하면서 또 옮긴 경우까지)
-            back = {os.path.realpath(moved.get(p, p)): p for p in paths}
+            res = music.refresh(now, prog, cancelled, exp, relocate=relocate)
+            # music.refresh 의 키는 '반영 시작 때 경로'이므로 목록의 원래 경로로 되돌린다
+            orig = {os.path.realpath(moved.get(p, p)): os.path.realpath(p) for p in paths}
             final = {}
             for p in paths:
-                cur = os.path.realpath(moved.get(p, p))
-                final_path = res.relocated.get(cur, moved.get(p))
-                if final_path:
-                    final[os.path.realpath(p)] = final_path
+                start = os.path.realpath(moved.get(p, p))
+                end = res.relocated.get(start, moved.get(p))
+                if end:
+                    final[os.path.realpath(p)] = end
             res.relocated = final
-            res.failed = [(back.get(fp, fp), why) for fp, why in res.failed]
+            res.failed = [(orig.get(k, k), why) for k, why in res.failed]
+            res.unconfirmed = [orig.get(k, k) for k in res.unconfirmed]
+            res.notfound = [orig.get(k, k) for k in res.notfound]
             return res
 
         run_task(self, "Apple Music에 반영", job,
