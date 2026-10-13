@@ -287,23 +287,47 @@ def refresh(paths, progress=lambda *_: None, cancelled=lambda: False, expected=N
     ensure_access()
 
     pid_of = {}
-    for start in range(0, total, 40):  # 명령줄 길이 제한
-        batch = paths[start:start + 40]
+    errors = {}
+    todo = list(paths)
+    # 저장 직후에는 Music이 곡 위치를 다시 확인하는 동안 잠깐 찾지 못할 수 있다 (-10001, -1700 등).
+    # 찾지 못한 곡만 잠시 기다렸다가 다시 찾는다.
+    for attempt in range(3):
+        if not todo or cancelled():
+            break
+        if attempt:
+            wait = 2.0 * attempt
+            progress(0, len(todo), f"Music이 곡을 찾지 못해 {wait:.0f}초 뒤 다시 찾습니다 ({len(todo)}곡)")
+            time.sleep(wait)
+        retry = []
+        for start in range(0, len(todo), 40):  # 명령줄 길이 제한
+            batch = todo[start:start + 40]
 
-        def report(cur, start=start, batch=batch):
-            name = os.path.basename(batch[min(cur, len(batch) - 1)])
-            progress(start + cur, total, f"Music에서 새로 읽는 중 ({start + cur}/{total}) · {name}")
-        lines = _run_script(REFRESH_SCRIPT, batch, report, cancelled)
-        for parts in _tagged(lines, "LOCALTAG_RESULT:"):
-            if len(parts) < 3:
-                continue
-            path, status, pid = parts[0], parts[1], parts[2]
-            if status == "notfound":
-                res.notfound.append(path)
-            elif pid:
-                pid_of[path] = pid   # ok 이거나, 시간 초과처럼 보여도 실제로는 처리됐을 수 있음
-            else:
-                res.failed.append((path, f"Music에서 곡을 찾는 중 오류 ({status})"))
+            def report(cur, start=start, batch=batch, n=len(todo)):
+                name = os.path.basename(batch[min(cur, len(batch) - 1)])
+                progress(start + cur, n, f"Music에서 새로 읽는 중 ({start + cur}/{n}) · {name}")
+            lines = _run_script(REFRESH_SCRIPT, batch, report, cancelled)
+            reported = set()
+            for parts in _tagged(lines, "LOCALTAG_RESULT:"):
+                if len(parts) < 3:
+                    continue
+                path, status, pid = parts[0], parts[1], parts[2]
+                reported.add(path)
+                if status == "notfound":
+                    res.notfound.append(path)
+                elif pid:
+                    pid_of[path] = pid   # ok 이거나, 시간 초과처럼 보여도 실제로는 처리됐을 수 있음
+                    errors.pop(path, None)
+                else:
+                    errors[path] = status
+                    retry.append(path)
+            for path in batch:
+                if path not in reported:
+                    errors[path] = "응답 없음"
+                    retry.append(path)
+        todo = retry
+    for path, status in errors.items():
+        if path not in pid_of:
+            res.failed.append((path, f"Music에서 곡을 찾지 못했습니다 ({status})"))
 
     # ---- 확인과 재시도
     pending = dict(pid_of)

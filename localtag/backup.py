@@ -15,7 +15,7 @@ import time
 import uuid
 from datetime import datetime
 
-from .safewrite import copy_preserving, SafeWriteError
+from .safewrite import copy_preserving, SafeWriteError, write_back
 from .tagio import move_file
 
 
@@ -164,7 +164,12 @@ class BackupStore:
                     if cur != orig and os.path.exists(orig) and not os.path.samefile(cur, orig):
                         os.unlink(stage)
                         raise SafeWriteError(f"원래 위치에 다른 파일이 있습니다: {os.path.basename(orig)}")
-                    os.replace(stage, orig)
+                    if os.path.exists(orig):
+                        write_back(stage, orig)  # 파일 번호 유지 (Music이 곡을 놓치지 않게)
+                        if os.path.exists(stage):
+                            os.unlink(stage)
+                    else:
+                        os.replace(stage, orig)
                     if cur != orig and os.path.exists(cur) and not os.path.samefile(cur, orig):
                         os.unlink(cur)
                 elif cur != orig:

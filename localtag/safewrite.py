@@ -23,6 +23,10 @@ class SafeWriteError(Exception):
     pass
 
 
+class StageKeptError(SafeWriteError):
+    """원본을 고치지 못해 검증된 작업 사본을 일부러 남겨 둔 경우."""
+
+
 def check_writable(path: str):
     try:
         st = os.lstat(path)
@@ -147,10 +151,9 @@ def safe_modify(path: str, fn, enabled: bool = True, keep_mtime: bool = False):
         if keep_mtime:
             os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
         return
-    if st.st_nlink > 1:
-        raise SafeWriteError("하드 링크가 걸린 파일입니다. 설정에서 '안전하게 저장'을 끄면 편집할 수 있습니다.")
     folder, ext = os.path.dirname(path), os.path.splitext(path)[1]
     stage = os.path.join(folder, f"{STAGE_PREFIX}{uuid.uuid4().hex}{ext}")
+    keep_stage = False
     try:
         copy_preserving(path, stage)
         before_audio = payload_hash(stage)
@@ -165,14 +168,53 @@ def safe_modify(path: str, fn, enabled: bool = True, keep_mtime: bool = False):
         now = os.stat(path)
         if (now.st_size, now.st_mtime_ns, now.st_ino) != (st.st_size, st.st_mtime_ns, st.st_ino):
             raise SafeWriteError("작업하는 동안 다른 프로그램이 파일을 바꿨습니다. 원본은 그대로입니다.")
-        if keep_mtime:
-            os.utime(stage, ns=(st.st_atime_ns, st.st_mtime_ns))
         _fsync(stage)
-        os.replace(stage, path)
-        _fsync(folder)
+        try:
+            write_back(stage, path)
+        except StageKeptError:
+            keep_stage = True
+            raise
+        if keep_mtime:
+            os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
     finally:
-        if os.path.exists(stage):
+        if not keep_stage and os.path.exists(stage):
             os.unlink(stage)
+
+
+def _digest(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def write_back(src: str, dst: str):
+    """검증한 사본(src)의 내용을 원본(dst) 파일 안에 다시 쓴다.
+
+    파일을 통째로 바꿔치기(os.replace)하면 내용이 같아도 다른 파일(새 inode)이 되어,
+    파일 번호로 곡 위치를 기억하는 Apple Music이 저장 직후 곡을 잠깐 찾지 못한다.
+    같은 파일에 덮어쓰면 Music·Finder 별칭·하드 링크가 그대로 유지된다.
+    중간에 실패하면 사본으로 원본을 교체해 반쯤 쓰인 파일이 남지 않게 한다.
+    """
+    h = hashlib.sha256()
+    try:
+        with open(src, "rb") as s, open(dst, "r+b") as d:
+            for block in iter(lambda: s.read(1024 * 1024), b""):
+                d.write(block)
+                h.update(block)
+            d.truncate()
+            d.flush()
+            os.fsync(d.fileno())
+        if _digest(dst) != h.hexdigest():
+            raise SafeWriteError("덮어쓴 내용 확인에 실패했습니다.")
+    except Exception:
+        # 원본이 반쯤 쓰였을 수 있으므로 검증된 사본으로 교체한다 (내용은 올바름)
+        try:
+            os.replace(src, dst)
+            _fsync(os.path.dirname(dst))
+        except OSError as e:
+            raise StageKeptError(f"원본을 다시 쓰지 못했습니다. 작업 사본이 남아 있습니다: {src}\n{e}") from e
 
 
 def clean_stale_stages(folder: str):
