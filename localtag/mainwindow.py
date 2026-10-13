@@ -21,6 +21,7 @@ from .backupdialog import BackupDialog
 from .actions import ACTION_TYPES, ActionStore, describe, new_action, run_actions
 from .converters import CONVERTERS, AutoNumber
 from .export import ExportDialog, PlaylistDialog
+from .filetrack import find_moved
 from .exttags import ExtendedTagsDialog
 from .filterexpr import FilterError, compile_filter
 from .model import COLUMN_WIDTHS, COLUMNS, FileModel, SortProxy, fmt_length, fmt_size
@@ -428,46 +429,26 @@ class MainWindow(QMainWindow):
         return loaded, failed
 
     def _find_moved(self, files):
-        """사라진 파일을 같은 디스크에서 inode로 찾는다 (Music이 폴더를 정리한 경우 등)."""
-        missing = {(f.dev, f.ino): f for f in files if f.ino and not os.path.exists(f.path)}
-        found = {}
-        if not missing:
-            return found
-        roots = set()
-        for f in missing.values():
-            root = os.path.dirname(f.path)
-            for name in ("Media", "Media.localized", "Music Media", "iTunes Media"):
-                i = f.path.find("/" + name + "/")
-                if i >= 0:
-                    root = f.path[:i + len(name) + 1]
-                    break
-            else:
-                root = os.path.dirname(root)  # 앨범 폴더 이름이 바뀐 경우를 위해 한 단계 위부터
-            roots.add(root)
-        for root in sorted(roots):
-            for d, dirs, names in os.walk(root):
-                dirs[:] = [x for x in dirs if not x.startswith(".")]
-                for n in names:
-                    p = os.path.join(d, n)
-                    try:
-                        st = os.stat(p)
-                    except OSError:
-                        continue
-                    f = missing.pop((st.st_dev, st.st_ino), None)
-                    if f is not None:
-                        found[f.path] = p
-                if not missing:
-                    return found
-        return found
+        """사라진 파일을 같은 디스크에서 파일 번호(inode)로 찾는다 (Music이 폴더를 정리한 경우 등)."""
+        return find_moved([(f.path, f.dev, f.ino) for f in files])
+
+    def _relink_missing(self, files):
+        """목록의 파일 중 옮겨진 것을 새 경로로 고친다. 고친 개수를 돌려준다."""
+        moved = self._find_moved(files)
+        for f in files:
+            if f.path in moved:
+                f.path = moved[f.path]
+                try:
+                    self.model.replace(f, f)  # 표의 경로 칸 갱신
+                except StopIteration:
+                    pass
+        if moved:
+            self.statusBar().showMessage(f"옮겨진 파일 {len(moved)}개를 새 위치에서 다시 찾았습니다.", 6000)
+        return len(moved)
 
     def refresh(self):
         self._confirm_pending()
-        moved = self._find_moved(self.model.files)
-        for f in self.model.files:
-            if f.path in moved:
-                f.path = moved[f.path]
-        if moved:
-            self.statusBar().showMessage(f"옮겨진 파일 {len(moved)}개를 다시 찾았습니다.", 6000)
+        self._relink_missing(self.model.files)
         paths = [f.path for f in self.model.files if os.path.exists(f.path)]
         selected = {f.path for f in self.selected_files()}
         loaded, failed = self._load_files(paths, "다시 읽는 중…")
@@ -533,6 +514,8 @@ class MainWindow(QMainWindow):
 
     def apply_plans(self, plans, label, refresh_panel=True):
         """작업 목록을 실제 파일에 적용하고 실행 취소 기록을 남긴다."""
+        # Music이 그사이 파일을 옮겼을 수 있으므로 먼저 새 위치를 찾는다
+        self._relink_missing([p.file for p in plans])
         if not plans:
             if refresh_panel:
                 self.panel.set_files(self.selected_files())
@@ -790,8 +773,27 @@ class MainWindow(QMainWindow):
             else:
                 self.statusBar().showMessage(f"Music 자동 반영 실패: {msg}", 8000)
 
-        run_task(self, "Apple Music에 반영",
-                 lambda prog, cancelled: music.refresh(paths, prog, cancelled, expected),
+        entries = [(p, by_path[p].dev, by_path[p].ino) for p in paths if p in by_path]
+
+        def job(prog, cancelled):
+            prog(0, len(paths), "옮겨진 파일이 있는지 확인하는 중")
+            moved = find_moved(entries, cancelled)          # 옛 경로 → 지금 경로
+            now = [moved.get(p, p) for p in paths]
+            exp = {moved.get(p, p): v for p, v in expected.items()}
+            res = music.refresh(now, prog, cancelled, exp)
+            # 목록의 옛 경로 → 최종 경로 (Music이 반영하면서 또 옮긴 경우까지)
+            back = {os.path.realpath(moved.get(p, p)): p for p in paths}
+            final = {}
+            for p in paths:
+                cur = os.path.realpath(moved.get(p, p))
+                final_path = res.relocated.get(cur, moved.get(p))
+                if final_path:
+                    final[os.path.realpath(p)] = final_path
+            res.relocated = final
+            res.failed = [(back.get(fp, fp), why) for fp, why in res.failed]
+            return res
+
+        run_task(self, "Apple Music에 반영", job,
                  done, fail, modal=modal, status=lambda m: self.statusBar().showMessage(m, 3000))
 
     def _music_error(self, msg):

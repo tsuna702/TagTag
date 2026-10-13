@@ -327,7 +327,11 @@ def refresh(paths, progress=lambda *_: None, cancelled=lambda: False, expected=N
         todo = retry
     for path, status in errors.items():
         if path not in pid_of:
-            res.failed.append((path, f"Music에서 곡을 찾지 못했습니다 ({status})"))
+            if not os.path.exists(path):
+                why = "파일이 옮겨졌거나 지워졌습니다. 목록을 새로 고침(F5)해 보세요"
+            else:
+                why = f"Music에서 곡을 찾지 못했습니다 ({status})"
+            res.failed.append((path, why))
 
     # ---- 확인과 재시도
     pending = dict(pid_of)
