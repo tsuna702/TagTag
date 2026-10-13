@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
 )
 
 from .actiondialogs import ActionEditDialog, ActionsDialog, PlansPreview, choose_action_type
+from .artworkdialog import ArtworkDialog
 from .backup import BackupStore
 from .backupdialog import BackupDialog
 from .actions import ACTION_TYPES, ActionStore, describe, new_action, run_actions
@@ -95,6 +96,7 @@ class MainWindow(QMainWindow):
         # ---- 태그 패널
         self.panel = TagPanel()
         self.panel.saveRequested.connect(self.save)
+        self.panel.artworkRequested.connect(self.find_artwork)
         scroll = QScrollArea()
         scroll.setWidget(self.panel)
         scroll.setWidgetResizable(True)
@@ -196,6 +198,10 @@ class MainWindow(QMainWindow):
         m = mb.addMenu("변환")
         for text, key, cls in CONVERTERS:
             self._act(m, text, lambda _=False, cls=cls: self.run_converter(cls), key)
+
+        m = mb.addMenu("커버")
+        self._act(m, "앨범아트 찾기 · 가져오기…", self.find_artwork, "Ctrl+Shift+A")
+        self._act(m, "커버 크기 조정…", self.resize_covers, "Ctrl+Shift+K")
 
         m = mb.addMenu("액션")
         self._act(m, "액션 그룹…", self.run_action_groups, "Alt+6")
@@ -627,6 +633,40 @@ class MainWindow(QMainWindow):
         if r != QMessageBox.Yes:
             return
         self.apply_plans([Plan(f, remove_tags=True) for f in files], "태그 제거")
+
+    # ------------------------------------------------------------ 앨범아트
+    def find_artwork(self):
+        files = self._files_for_command()
+        if not files:
+            return
+        cache = QStandardPaths.writableLocation(QStandardPaths.CacheLocation)
+        dlg = ArtworkDialog(self, files, self.settings, os.path.join(cache, "recent-artwork"))
+        if dlg.exec() and dlg.picture is not None:
+            plans = []
+            for f in files:
+                pics = list(f.pictures)
+                idx = f.primary_index()
+                pic = dlg.picture
+                if idx >= 0:
+                    pics[idx] = pic
+                else:
+                    pics.insert(0, pic)
+                plans.append(Plan(f, pictures=pics))
+            self.apply_plans(plans, "커버 바꾸기")
+
+    def resize_covers(self):
+        files = self._files_for_command()
+        if not files:
+            return
+        last = self.settings.value("quick/resize_cover")
+        action = new_action("resize_cover")
+        if isinstance(last, dict):
+            action.update(last)
+        dlg = ActionEditDialog(self, action)
+        if dlg.exec():
+            a = dlg.result_action()
+            self.settings.setValue("quick/resize_cover", a)
+            self._run_actions_with_preview(describe(a), [a], files)
 
     # ------------------------------------------------------------ 확장 태그 · 내보내기
     def extended_tags(self):

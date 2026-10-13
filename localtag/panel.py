@@ -67,6 +67,7 @@ class CoverLabel(QLabel):
 
 class TagPanel(QWidget):
     saveRequested = Signal()
+    artworkRequested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -106,13 +107,17 @@ class TagPanel(QWidget):
         self.cover_info.setStyleSheet("color: gray;")
         layout.addWidget(self.cover_info)
         row = QHBoxLayout()
-        self.btn_add = QPushButton("커버 추가…")
+        self.btn_add = QPushButton("파일…")
+        self.btn_add.setToolTip("이미지 파일로 커버 바꾸기")
         self.btn_add.clicked.connect(self.choose_cover)
+        self.btn_find = QPushButton("찾기…")
+        self.btn_find.setToolTip("Apple Music 검색 · YouTube 썸네일 · 크기 조정 (⇧⌘A)")
+        self.btn_find.clicked.connect(self.artworkRequested)
         self.btn_del = QPushButton("삭제")
         self.btn_del.clicked.connect(self.remove_cover)
         self.btn_export = QPushButton("내보내기…")
         self.btn_export.clicked.connect(self.export_cover)
-        for b in (self.btn_add, self.btn_del, self.btn_export):
+        for b in (self.btn_find, self.btn_add, self.btn_del, self.btn_export):
             row.addWidget(b)
         layout.addLayout(row)
         layout.addStretch(1)
@@ -147,7 +152,7 @@ class TagPanel(QWidget):
             cb.setEnabled(enabled)
             cb.blockSignals(False)
             self.initial[name] = text
-        for b in (self.btn_add, self.btn_del, self.btn_export):
+        for b in (self.btn_find, self.btn_add, self.btn_del, self.btn_export):
             b.setEnabled(enabled)
         self._show_cover()
 
@@ -201,7 +206,8 @@ class TagPanel(QWidget):
         if not self.files:
             return
         m = QMenu(self)
-        m.addAction("커버 추가…", self.choose_cover)
+        m.addAction("커버 찾기 (Apple Music · YouTube)…", self.artworkRequested.emit)
+        m.addAction("이미지 파일로 바꾸기…", self.choose_cover)
         m.addAction("클립보드에서 붙여넣기", self.paste_cover)
         m.addAction("클립보드로 복사", self.copy_cover)
         m.addSeparator()

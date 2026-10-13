@@ -58,7 +58,16 @@ FORMS = {
     "export_cover": [("filename", "파일명 (확장자 제외, 포맷 문자열)", "format"),
                      ("overwrite", "이미 있으면 덮어쓰기", "bool")],
     "remove_cover": [],
+    "resize_cover": [("size", "크기", "choice_size"), ("fit", "맞춤", "choice_fit"),
+                     ("trim", "가장자리 검은 띠 없애기", "bool")],
 }
+
+
+def _choices(kind):
+    from .artwork import FITS
+    if kind == "choice_size":
+        return {s: f"{s} × {s}" for s in (500, 600, 1000)}
+    return dict(FITS)
 
 
 class ActionEditDialog(QDialog):
@@ -78,6 +87,14 @@ class ActionEditDialog(QDialog):
                 names = ([ALL] if kind == "field_all" else []) + FIELDS + ([FILENAME] if kind == "field_fn" else [])
                 w, getter = field_combo(names, val)
                 self.getters[key] = getter
+                form.addRow(label + ":", w)
+            elif kind.startswith("choice_"):
+                w = QComboBox()
+                opts = _choices(kind)
+                for k, t in opts.items():
+                    w.addItem(t, k)
+                w.setCurrentIndex(max(0, w.findData(val)))
+                self.getters[key] = w.currentData
                 form.addRow(label + ":", w)
             elif kind == "mode":
                 w = QComboBox()

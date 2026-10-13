@@ -34,6 +34,7 @@ ACTION_TYPES = {
     "import_cover": "파일에서 커버 가져오기",
     "export_cover": "커버를 파일로 내보내기",
     "remove_cover": "커버 제거",
+    "resize_cover": "커버 크기 조정",
 }
 
 CASE_MODES = {
@@ -56,6 +57,7 @@ DEFAULTS = {
     "import_cover": {"filename": "cover.jpg", "replace": True},
     "export_cover": {"filename": "cover", "overwrite": False},
     "remove_cover": {},
+    "resize_cover": {"size": 500, "fit": "crop", "trim": False},
 }
 
 
@@ -89,6 +91,9 @@ def describe(a: dict) -> str:
         return f"{name}: {a['source']} → {a['pattern']}"
     if t in ("import_cover", "export_cover"):
         return f"{name}: {a['filename']}"
+    if t == "resize_cover":
+        from .artwork import FITS
+        return f"{name}: {a.get('size')}×{a.get('size')} {FITS.get(a.get('fit'), '')}"
     return name
 
 
@@ -236,6 +241,20 @@ def apply_action(w: Work, a: dict, index: int, total: int):
     elif t == "remove_cover":
         if w.pictures:
             w.pictures, w.pics_changed = [], True
+    elif t == "resize_cover":
+        from .artwork import ArtworkError, process
+        idx = next((i for i, p in enumerate(w.pictures) if p.type == 3), 0 if w.pictures else -1)
+        if idx < 0:
+            return
+        old = w.pictures[idx]
+        try:
+            new = process(old.data, int(a.get("size", 500)), a.get("fit", "crop"), bool(a.get("trim")))
+        except ArtworkError as e:
+            raise ValueError(str(e)) from e
+        new.type, new.desc = old.type, old.desc
+        if new.data != old.data:
+            w.pictures[idx] = new
+            w.pics_changed = True
 
 
 def run_actions(actions: list[dict], files: list[AudioFile]) -> list[Plan]:
