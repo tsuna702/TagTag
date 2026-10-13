@@ -4,19 +4,27 @@ from __future__ import annotations
 import os
 import subprocess
 
-from PySide6.QtCore import QEvent, QItemSelectionModel, QSettings, Qt, QUrl
+from PySide6.QtCore import QEvent, QItemSelectionModel, QSettings, QStandardPaths, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QFileDialog, QHeaderView, QLabel, QMainWindow,
-    QMenu, QMessageBox, QProgressDialog, QScrollArea, QSplitter, QTableView,
+    QAbstractItemView, QApplication, QFileDialog, QHeaderView, QLabel, QLineEdit, QMainWindow,
+    QMenu, QMessageBox, QProgressDialog, QScrollArea, QSplitter, QTableView, QVBoxLayout, QWidget,
 )
 
-from .converters import CONVERTERS
+from .actiondialogs import ActionEditDialog, ActionsDialog, PlansPreview, choose_action_type
+from .actions import ACTION_TYPES, ActionStore, describe, new_action, run_actions
+from .converters import CONVERTERS, AutoNumber
+from .filterexpr import FilterError, compile_filter
 from .model import COLUMN_WIDTHS, COLUMNS, FileModel, SortProxy, fmt_length, fmt_size
 from .panel import TagPanel
-from .tagio import AUDIO_EXTS, AudioFile, Options, UnsupportedFile, scan
+from .plan import Plan, UndoEntry, UndoItem
+from .tagio import (
+    AUDIO_EXTS, AudioFile, Options, UnsupportedFile, move_file, restore_snapshot, scan, take_snapshot,
+)
 
 APP_NAME = "LocalTag"
+UNDO_LEVELS = 30
+UNDO_MEMORY = 512 * 1024 * 1024  # 실행 취소 기록이 이보다 커지면 오래된 것부터 버린다
 
 
 class MainWindow(QMainWindow):
@@ -32,6 +40,9 @@ class MainWindow(QMainWindow):
         )
         self.recursive = self.settings.value("recursive", True, bool)
         self.last_dir = self.settings.value("last_dir", os.path.expanduser("~/Music"), str)
+        self.undo_stack: list[UndoEntry] = []
+        data_dir = QStandardPaths.writableLocation(QStandardPaths.AppDataLocation)
+        self.actions = ActionStore(os.path.join(data_dir, "actions.json"))
 
         # ---- 파일 목록
         self.model = FileModel(self)
@@ -77,9 +88,27 @@ class MainWindow(QMainWindow):
         scroll.setWidgetResizable(True)
         scroll.setMinimumWidth(280)
 
+        # ---- 필터
+        self.filter_edit = QLineEdit()
+        self.filter_edit.setClearButtonEnabled(True)
+        self.filter_edit.setPlaceholderText(
+            "필터 (⌘F) — 예: 아이유 · artist HAS 아이유 · year GREATER 2010 AND genre MISSING")
+        self.filter_edit.textChanged.connect(lambda _: self.filter_timer.start())
+        self.filter_edit.installEventFilter(self)
+        self.filter_timer = QTimer(self)
+        self.filter_timer.setSingleShot(True)
+        self.filter_timer.setInterval(250)
+        self.filter_timer.timeout.connect(self.apply_filter)
+        right = QWidget()
+        rv = QVBoxLayout(right)
+        rv.setContentsMargins(0, 0, 0, 0)
+        rv.setSpacing(4)
+        rv.addWidget(self.filter_edit)
+        rv.addWidget(self.table)
+
         self.splitter = QSplitter(Qt.Horizontal)
         self.splitter.addWidget(scroll)
-        self.splitter.addWidget(self.table)
+        self.splitter.addWidget(right)
         self.splitter.setStretchFactor(1, 1)
         self.splitter.setSizes([320, 900])
         sp = self.settings.value("splitter")
@@ -130,6 +159,9 @@ class MainWindow(QMainWindow):
         quit_act.setMenuRole(QAction.QuitRole)
 
         m = mb.addMenu("편집")
+        self.undo_act = self._act(m, "실행 취소", self.undo, QKeySequence.Undo)
+        self.undo_act.setEnabled(False)
+        m.addSeparator()
         self._act(m, "모두 선택", self.table.selectAll, QKeySequence.SelectAll)
         self._act(m, "선택 반전", self.invert_selection, "Ctrl+I")
         m.addSeparator()
@@ -141,10 +173,18 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         self._act(m, "재생", self.play, "Ctrl+P")
         self._act(m, "Finder에서 보기", self.reveal, "Ctrl+Shift+R")
+        m.addSeparator()
+        self._act(m, "필터", self.focus_filter, QKeySequence.Find)
 
         m = mb.addMenu("변환")
         for text, key, cls in CONVERTERS:
             self._act(m, text, lambda _=False, cls=cls: self.run_converter(cls), key)
+
+        m = mb.addMenu("액션")
+        self._act(m, "액션 그룹…", self.run_action_groups, "Alt+6")
+        self._act(m, "빠른 액션…", self.quick_action, "Alt+7")
+        m.addSeparator()
+        self._act(m, "자동 번호 매기기…", lambda: self.run_converter(AutoNumber), "Ctrl+K")
 
         m = mb.addMenu("설정")
         sub = m.addMenu("ID3 버전")
@@ -194,6 +234,10 @@ class MainWindow(QMainWindow):
         conv = m.addMenu("변환")
         for text, _, cls in CONVERTERS:
             conv.addAction(text, lambda cls=cls: self.run_converter(cls))
+        act = m.addMenu("액션")
+        act.addAction("액션 그룹…", self.run_action_groups)
+        act.addAction("빠른 액션…", self.quick_action)
+        act.addAction("자동 번호 매기기…", lambda: self.run_converter(AutoNumber))
         m.addSeparator()
         m.addAction("목록에서 제거", self.remove_from_list)
         m.addAction("태그 제거…", self.remove_tags)
@@ -232,10 +276,12 @@ class MainWindow(QMainWindow):
 
     def _update_status(self):
         sel = self.selected_files()
-        files = sel or self.model.files
+        shown = self.proxy.rowCount()
+        files = sel or (self.visible_files() if self.proxy.filter_fn else self.model.files)
         total = sum(f.length for f in files)
         size = sum(f.size for f in files)
-        prefix = f"{len(sel)}개 선택 / 전체 {len(self.model.files)}개" if sel else f"전체 {len(self.model.files)}개"
+        count = f"표시 {shown} / 전체 {len(self.model.files)}개" if self.proxy.filter_fn else f"전체 {len(self.model.files)}개"
+        prefix = f"{len(sel)}개 선택 · {count}" if sel else count
         self.status.setText(f"{prefix}  |  {fmt_length(total)}  |  {fmt_size(size)}")
 
     # ------------------------------------------------------------ 불러오기
@@ -334,16 +380,8 @@ class MainWindow(QMainWindow):
                                 "여러 파일을 선택했을 때는 파일명을 한꺼번에 바꿀 수 없습니다.\n"
                                 "변환 메뉴의 '태그 → 파일명'을 쓰세요.")
             return
-
-        failed = []
-        prog = None
-        if len(files) > 10:
-            prog = QProgressDialog("저장하는 중…", None, 0, len(files), self)
-            prog.setWindowModality(Qt.WindowModal)
-            prog.setMinimumDuration(300)
-        for i, f in enumerate(files):
-            if prog:
-                prog.setValue(i)
+        plans = []
+        for f in files:
             pics = None
             if cover_op:
                 pics = list(f.pictures)
@@ -355,36 +393,26 @@ class MainWindow(QMainWindow):
                         pics.insert(0, cover_op[1])
                 elif idx >= 0:
                     del pics[idx]
-            try:
-                new = f.save(changes, pics, self.opts) if (changes or pics is not None) else f
-                if new_stem is not None:
-                    new.rename(new_stem)
-                    new = AudioFile.load(new.path, self.opts)
-            except Exception as e:
-                failed.append((f.path, str(e)))
-                continue
-            self.model.replace(f, new)
-        if prog:
-            prog.close()
-        if refresh_panel:
-            self.panel.set_files(self.selected_files())
-        self._update_status()
-        self._report_failures(failed, "저장하지 못한 파일")
-        ok = len(files) - len(failed)
-        self.statusBar().showMessage(f"{ok}개 파일을 저장했습니다.", 5000)
+            p = Plan(f, changes=dict(changes), pictures=pics)
+            if new_stem is not None:
+                try:
+                    new_path = f.path_for_stem(new_stem)
+                except ValueError as e:
+                    QMessageBox.warning(self, "파일명", str(e))
+                    return
+                if new_path != f.path:
+                    p.new_path = new_path
+            if p.actionable:
+                plans.append(p)
+        self.apply_plans(plans, "태그 저장", refresh_panel=refresh_panel)
 
-    # ------------------------------------------------------------ 변환기
-    def run_converter(self, cls):
-        self._confirm_pending()
-        files = self.selected_files()
-        if not files:
-            QMessageBox.information(self, APP_NAME, "변환할 파일을 먼저 선택하세요.")
+    def apply_plans(self, plans, label, refresh_panel=True):
+        """작업 목록을 실제 파일에 적용하고 실행 취소 기록을 남긴다."""
+        if not plans:
+            if refresh_panel:
+                self.panel.set_files(self.selected_files())
             return
-        dlg = cls(self, files, self.settings)
-        if dlg.exec():
-            self.apply_plans(dlg.result_plans())
-
-    def apply_plans(self, plans):
+        entry = UndoEntry(label)
         failed = []
         prog = None
         if len(plans) > 10:
@@ -395,26 +423,133 @@ class MainWindow(QMainWindow):
             if prog:
                 prog.setValue(i)
             f = p.file
+            old_path = f.path
+            snap = None
             try:
-                new = f.save(p.changes, None, self.opts) if p.changes else f
+                if p.touches_tags:
+                    snap = take_snapshot(old_path)
+                new = f
+                if p.remove_tags:
+                    new = new.remove_tags(self.opts)
+                if p.changes or p.pictures is not None:
+                    new = new.save(p.changes, p.pictures, self.opts)
+                cur_path = new.path
                 if p.new_path:
-                    new.move_to(p.new_path)
-                    new = AudioFile.load(new.path, self.opts)
+                    move_file(cur_path, p.new_path)
+                    cur_path = p.new_path
+                entry.items.append(UndoItem(old_path, cur_path, snap))
+                snap = None
+                self.model.replace(f, AudioFile.load(cur_path, self.opts))
+                for path, data in p.exports:
+                    with open(path, "wb") as fh:
+                        fh.write(data)
             except Exception as e:
-                failed.append((f.path, str(e)))
-                # 이름 바꾸기 도중 실패해도 목록은 실제 파일 상태에 맞춘다
+                failed.append((old_path, str(e)))
+                if snap is not None and os.path.exists(old_path):
+                    # 일부만 바뀐 채로 남지 않게 되돌려 둔다
+                    entry.items.append(UndoItem(old_path, old_path, snap))
                 try:
                     self.model.replace(f, AudioFile.load(f.path, self.opts))
                 except Exception:
                     pass
-                continue
-            self.model.replace(f, new)
         if prog:
             prog.close()
-        self.panel.set_files(self.selected_files())
+        if entry.items:
+            self._push_undo(entry)
+        if refresh_panel:
+            self.panel.set_files(self.selected_files())
         self._update_status()
         self._report_failures(failed, "처리하지 못한 파일")
-        self.statusBar().showMessage(f"{len(plans) - len(failed)}개 파일에 적용했습니다.", 5000)
+        self.statusBar().showMessage(f"{label}: {len(plans) - len(failed)}개 파일에 적용했습니다.", 5000)
+
+    # ------------------------------------------------------------ 실행 취소
+    def _push_undo(self, entry):
+        self.undo_stack.append(entry)
+        while len(self.undo_stack) > UNDO_LEVELS or (
+                len(self.undo_stack) > 1 and sum(e.size_estimate() for e in self.undo_stack) > UNDO_MEMORY):
+            self.undo_stack.pop(0)
+        self._update_undo_action()
+
+    def _update_undo_action(self):
+        if self.undo_stack:
+            self.undo_act.setText(f"실행 취소: {self.undo_stack[-1].label}")
+            self.undo_act.setEnabled(True)
+        else:
+            self.undo_act.setText("실행 취소")
+            self.undo_act.setEnabled(False)
+
+    def undo(self):
+        if not self.undo_stack:
+            return
+        entry = self.undo_stack.pop()
+        by_path = {f.path: f for f in self.model.files}
+        failed = []
+        for item in reversed(entry.items):
+            try:
+                if item.new_path != item.old_path:
+                    move_file(item.new_path, item.old_path)
+                if item.snapshot is not None:
+                    restore_snapshot(item.old_path, item.snapshot)
+                restored = AudioFile.load(item.old_path, self.opts)
+                f = by_path.get(item.new_path)
+                if f is not None:
+                    self.model.replace(f, restored)
+            except Exception as e:
+                failed.append((item.new_path, str(e)))
+        self._update_undo_action()
+        self.panel.set_files(self.selected_files())
+        self._update_status()
+        self._report_failures(failed, "되돌리지 못한 파일")
+        self.statusBar().showMessage(f"실행 취소: {entry.label}", 5000)
+
+    # ------------------------------------------------------------ 변환기 · 액션
+    def _files_for_command(self):
+        self._confirm_pending()
+        files = self.selected_files()
+        if not files:
+            QMessageBox.information(self, APP_NAME, "파일을 먼저 선택하세요.")
+        return files
+
+    def run_converter(self, cls):
+        files = self._files_for_command()
+        if not files:
+            return
+        dlg = cls(self, files, self.settings)
+        if dlg.exec():
+            self.apply_plans(dlg.result_plans(), cls.title.replace("변환: ", ""))
+
+    def _run_actions_with_preview(self, label, actions, files):
+        dlg = PlansPreview(self, files, self.settings, f"액션: {label}",
+                           lambda: run_actions(actions, files))
+        if dlg.exec():
+            self.apply_plans(dlg.result_plans(), label)
+
+    def run_action_groups(self):
+        files = self._files_for_command()
+        if not files:
+            return
+        dlg = ActionsDialog(self, self.actions)
+        if dlg.exec():
+            label, actions = dlg.selected_actions()
+            self._run_actions_with_preview(label, actions, files)
+
+    def quick_action(self):
+        files = self._files_for_command()
+        if not files:
+            return
+        from PySide6.QtGui import QCursor
+        kind = choose_action_type(self, QCursor.pos())
+        if not kind:
+            return
+        last = self.settings.value(f"quick/{kind}")
+        action = new_action(kind)
+        if isinstance(last, dict):
+            action.update(last)
+        dlg = ActionEditDialog(self, action)
+        if dlg.exec():
+            a = dlg.result_action()
+            self.settings.setValue(f"quick/{kind}", a)
+            self._run_actions_with_preview(describe(a), [a], files)
 
     def remove_tags(self):
         files = self.selected_files()
@@ -422,17 +557,30 @@ class MainWindow(QMainWindow):
             return
         r = QMessageBox.warning(
             self, "태그 제거", f"선택한 {len(files)}개 파일의 태그와 커버를 모두 지웁니다.\n"
-            "되돌릴 수 없습니다. 계속할까요?", QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel)
+            "편집 → 실행 취소로 되돌릴 수 있습니다. 계속할까요?",
+            QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel)
         if r != QMessageBox.Yes:
             return
-        failed = []
-        for f in files:
-            try:
-                self.model.replace(f, f.remove_tags(self.opts))
-            except Exception as e:
-                failed.append((f.path, str(e)))
-        self.panel.set_files(self.selected_files())
-        self._report_failures(failed, "태그를 지우지 못한 파일")
+        self.apply_plans([Plan(f, remove_tags=True) for f in files], "태그 제거")
+
+    # ------------------------------------------------------------ 필터
+    def focus_filter(self):
+        self.filter_edit.setFocus()
+        self.filter_edit.selectAll()
+
+    def apply_filter(self):
+        text = self.filter_edit.text()
+        try:
+            fn = compile_filter(text)
+            self.filter_edit.setStyleSheet("")
+            self.filter_edit.setToolTip("")
+        except FilterError as e:
+            self.filter_edit.setStyleSheet("QLineEdit { color: #c82828; }")
+            self.filter_edit.setToolTip(f"필터 오류: {e}")
+            self.statusBar().showMessage(f"필터 오류: {e}", 5000)
+            return
+        self.proxy.set_filter(fn)
+        self._update_status()
 
     # ------------------------------------------------------------ 기타 동작
     def remove_from_list(self):
@@ -466,6 +614,10 @@ class MainWindow(QMainWindow):
             self.load_paths(paths, replace=False)
 
     def eventFilter(self, obj, e):
+        if obj is self.filter_edit and e.type() == QEvent.KeyPress and e.key() == Qt.Key_Escape:
+            self.filter_edit.clear()
+            self.table.setFocus()
+            return True
         if obj is self.table.viewport():
             if e.type() in (QEvent.DragEnter, QEvent.DragMove) and e.mimeData().hasUrls():
                 e.acceptProposedAction()

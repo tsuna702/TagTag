@@ -135,6 +135,21 @@ class SortProxy(QSortFilterProxyModel):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setSortRole(SORT_ROLE)
+        self.filter_fn = None
+
+    def set_filter(self, fn):
+        if hasattr(self, "beginFilterChange"):  # Qt 6.10+
+            self.beginFilterChange()
+            self.filter_fn = fn
+            self.endFilterChange()
+        else:
+            self.filter_fn = fn
+            self.invalidateFilter()
+
+    def filterAcceptsRow(self, row, parent):
+        if self.filter_fn is None:
+            return True
+        return self.filter_fn(self.sourceModel().files[row])
 
     def lessThan(self, left, right):
         a = self.sourceModel().data(left, SORT_ROLE)

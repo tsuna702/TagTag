@@ -3,16 +3,16 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass, field
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QBrush, QColor, QGuiApplication
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
+    QCheckBox, QComboBox, QDialog, QSpinBox, QDialogButtonBox, QFileDialog, QFormLayout,
     QHBoxLayout, QHeaderView, QLabel, QPlainTextEdit, QPushButton, QSizePolicy,
     QTableWidget, QTableWidgetItem, QTextBrowser, QVBoxLayout, QWidget,
 )
 
+from .plan import Plan
 from .script import HELP_HTML, Context, Pattern, ScriptError, evaluate, split_values
 from .tagio import FIELD_LABELS, FIELDS, SEP, AudioFile, nfc
 
@@ -20,20 +20,6 @@ PREVIEW_LIMIT = 1000
 HISTORY_MAX = 20
 ERROR_BRUSH = QBrush(QColor(200, 40, 40))
 SAME_BRUSH = QBrush(QColor(140, 140, 140))
-
-
-@dataclass
-class Plan:
-    file: AudioFile
-    changes: dict = field(default_factory=dict)
-    new_path: str | None = None
-    cells: list = field(default_factory=list)
-    error: str | None = None
-    unchanged: bool = False
-
-    @property
-    def actionable(self):
-        return not self.error and not self.unchanged and (self.changes or self.new_path)
 
 
 # ------------------------------------------------------------------ 파일명 만들기
@@ -575,6 +561,60 @@ class TextToTag(ConverterDialog):
 
     def remember(self):
         self.fmt.remember()
+
+
+# ------------------------------------------------------------------ 자동 번호 매기기
+
+class AutoNumber(ConverterDialog):
+    title = "자동 번호 매기기"
+    description = "목록에 보이는 순서대로 트랙 번호를 매깁니다."
+    ok_text = "번호 매기기"
+
+    def _spin(self, label, key, lo, hi, default):
+        sb = QSpinBox()
+        sb.setRange(lo, hi)
+        sb.setValue(self.settings.value(f"conv/{key}", default, int))
+        sb.valueChanged.connect(lambda v: self.settings.setValue(f"conv/{key}", v))
+        sb.valueChanged.connect(self.schedule)
+        self.form.addRow(label, sb)
+        return sb
+
+    def build(self):
+        self.start = self._spin("시작 번호:", "num_start", 0, 9999, 1)
+        self.digits = self._spin("자릿수 (앞을 0으로 채움):", "num_digits", 1, 4, 2)
+        self.total = self.add_check("전체 곡 수도 넣기 (예: 03/12)", "num_total", False)
+        self.per_folder = self.add_check("폴더가 바뀌면 다시 시작", "num_per_folder", True)
+        self.disc = self.add_check("폴더마다 디스크 번호도 1, 2, 3… 으로 매기기", "num_disc", False)
+
+    def headers(self):
+        return ["파일명", "현재 트랙", "새 트랙", "디스크", "상태"]
+
+    def make_plans(self):
+        groups = []
+        for f in self.files:
+            key = os.path.dirname(f.path) if self.per_folder.isChecked() else ""
+            if not groups or groups[-1][0] != key:
+                groups.append((key, []))
+            groups[-1][1].append(f)
+        plans = []
+        digits = self.digits.value()
+        for gi, (_, files) in enumerate(groups):
+            n_total = len(files)
+            for i, f in enumerate(files):
+                num = str(self.start.value() + i).zfill(digits)
+                track = f"{num}/{str(n_total).zfill(digits)}" if self.total.isChecked() else num
+                changes = {}
+                if f.tags.get("track") != [track]:
+                    changes["track"] = [track]
+                disc = ""
+                if self.disc.isChecked():
+                    disc = str(gi + 1)
+                    if f.tags.get("disc") != [disc]:
+                        changes["disc"] = [disc]
+                p = Plan(f, changes=changes, cells=[f.filename, f.get("track"), track, disc])
+                p.unchanged = not changes
+                plans.append(p)
+        return plans
 
 
 CONVERTERS = [

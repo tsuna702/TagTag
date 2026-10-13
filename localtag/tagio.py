@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import os
 import shutil
 import struct
@@ -623,29 +624,33 @@ class AudioFile:
             os.utime(self.path, (old.st_atime, old.st_mtime))
         return AudioFile.load(self.path, opts)
 
-    def rename(self, new_stem: str) -> str:
+    def path_for_stem(self, new_stem: str) -> str:
+        """같은 폴더에서 확장자는 그대로 두고 이름만 바꾼 경로."""
         new_stem = nfc(new_stem.strip()).replace("/", "_")
         if not new_stem:
             raise ValueError("파일명이 비어 있습니다.")
-        return self.move_to(os.path.join(os.path.dirname(self.path),
-                                         new_stem + os.path.splitext(self.path)[1]))
+        return os.path.join(os.path.dirname(self.path), new_stem + os.path.splitext(self.path)[1])
 
     def move_to(self, new_path: str) -> str:
         """파일 이름 바꾸기/옮기기. 필요하면 폴더를 만든다."""
-        if new_path == self.path:
-            return self.path
-        # 대소문자만 바뀌는 경우는 같은 파일이므로 허용
-        if os.path.exists(new_path) and not os.path.samefile(new_path, self.path):
-            raise FileExistsError(f"이미 같은 이름의 파일이 있습니다: {os.path.basename(new_path)}")
-        os.makedirs(os.path.dirname(new_path), exist_ok=True)
-        try:
-            os.rename(self.path, new_path)
-        except OSError as e:
-            if e.errno != 18:  # EXDEV: 다른 디스크로 옮기는 경우
-                raise
-            shutil.move(self.path, new_path)
+        move_file(self.path, new_path)
         self.path = new_path
         return new_path
+
+
+def move_file(src: str, dst: str):
+    if dst == src:
+        return
+    # 대소문자만 바뀌는 경우는 같은 파일이므로 허용
+    if os.path.exists(dst) and not os.path.samefile(dst, src):
+        raise FileExistsError(f"이미 같은 이름의 파일이 있습니다: {os.path.basename(dst)}")
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    try:
+        os.rename(src, dst)
+    except OSError as e:
+        if e.errno != 18:  # EXDEV: 다른 디스크로 옮기는 경우
+            raise
+        shutil.move(src, dst)
 
 
 def scan(paths, recursive=True):
@@ -669,3 +674,105 @@ def scan(paths, recursive=True):
                             and os.path.splitext(f)[1].lower() in AUDIO_EXTS):
                         found.append(fp)
     return found
+
+
+# ---------------------------------------------------------------- 실행 취소용 스냅샷
+
+@dataclass(eq=False)
+class Snapshot:
+    """파일의 태그 전체(지원하는 필드 외의 것까지)와 수정 시각을 그대로 보관한다."""
+    kind: str
+    data: object
+    had_v1: bool
+    atime: float
+    mtime: float
+
+    def size_estimate(self) -> int:
+        def walk(o):
+            if isinstance(o, (bytes, bytearray)):
+                return len(o)
+            if isinstance(o, str):
+                return len(o)
+            return 64
+        try:
+            if self.kind == "id3" and self.data is not None:
+                return sum(len(getattr(f, "data", b"")) + 64 for f in self.data.values())
+            if self.kind == "flac" and self.data is not None:
+                return sum(len(p.data) for p in self.data[1]) + 1024
+        except Exception:
+            pass
+        return 4096
+
+
+def take_snapshot(path: str) -> Snapshot:
+    mf = mutagen.File(path)
+    kind = _kind(mf)
+    st = os.stat(path)
+    tags = mf.tags
+    had_v1 = False
+    if kind == "id3":
+        data = copy.deepcopy(tags)
+        had_v1 = _has_id3v1(path)
+    elif kind == "flac":
+        data = (None if tags is None else copy.deepcopy(list(tags)),
+                copy.deepcopy(list(mf.pictures)))
+    elif kind in ("ogg", "asf"):
+        data = None if tags is None else copy.deepcopy(list(tags))
+    elif kind in ("mp4", "ape"):
+        data = None if tags is None else {k: copy.deepcopy(v) for k, v in tags.items()}
+    else:
+        raise UnsupportedFile("스냅샷을 지원하지 않는 형식")
+    return Snapshot(kind, data, had_v1, st.st_atime, st.st_mtime)
+
+
+def restore_snapshot(path: str, snap: Snapshot):
+    mf = mutagen.File(path)
+    kind = snap.kind
+    if kind == "id3":
+        tags = copy.deepcopy(snap.data)
+        is_mp3 = isinstance(mf, (MP3, TrueAudio))
+        if tags is None:
+            if is_mp3:
+                from mutagen.id3 import delete as id3_delete
+                id3_delete(path, delete_v1=True, delete_v2=True)
+            elif mf.tags is not None:
+                mf.delete()
+        else:
+            v2 = tags.version[1] if tags.version[0] == 2 and tags.version[1] in (3, 4) else 4
+            if v2 == 3:
+                tags.update_to_v23()
+            if is_mp3:
+                tags.save(path, v1=2 if snap.had_v1 else 0, v2_version=v2)
+            else:
+                mf.tags = tags
+                mf.save(v2_version=v2)
+    elif kind == "flac":
+        items, pics = snap.data
+        if mf.tags is None:
+            mf.add_tags()
+        del mf.tags[:]
+        if items:
+            mf.tags.extend(copy.deepcopy(items))
+        mf.clear_pictures()
+        for p in pics:
+            mf.add_picture(copy.deepcopy(p))
+        mf.save()
+    elif kind in ("ogg", "asf"):
+        if mf.tags is None:
+            mf.add_tags()
+        del mf.tags[:]
+        if snap.data:
+            mf.tags.extend(copy.deepcopy(snap.data))
+        mf.save()
+    elif kind in ("mp4", "ape"):
+        if snap.data is None:
+            if mf.tags is not None:
+                mf.delete()
+        else:
+            if mf.tags is None:
+                mf.add_tags()
+            mf.tags.clear()
+            for k, v in snap.data.items():
+                mf.tags[k] = copy.deepcopy(v)
+            mf.save()
+    os.utime(path, (snap.atime, snap.mtime))
