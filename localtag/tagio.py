@@ -14,6 +14,8 @@ import unicodedata
 from dataclasses import dataclass, field
 
 import mutagen
+
+from .safewrite import safe_modify
 from mutagen.aiff import AIFF
 from mutagen.apev2 import APEBinaryValue, APEv2File
 from mutagen.asf import ASF, ASFByteArrayAttribute
@@ -100,6 +102,7 @@ class Options:
     write_id3v1: bool = False   # ID3v1 태그도 함께 쓰기
     cp949_fallback: bool = True  # Latin-1로 저장된 ID3 텍스트를 CP949로 해석
     keep_mtime: bool = False    # 저장 후 파일 수정 시각 유지
+    safe_save: bool = True      # 사본에 쓰고 오디오 데이터를 검증한 뒤 교체
 
 
 @dataclass
@@ -737,69 +740,68 @@ class AudioFile:
     # ---- 쓰기
     def save(self, changes: dict, pictures: list | None, opts: Options) -> "AudioFile":
         """changes: {필드: [값...]} (빈 리스트는 삭제). pictures: None이면 커버 변경 없음."""
-        old = os.stat(self.path)
-        mf = mutagen.File(self.path)
-        kind = _kind(mf)
-        if mf.tags is None:
-            mf.add_tags()
-        tags = mf.tags
 
-        if kind == "id3":
-            _id3_write(tags, changes, pictures, opts)
-            v2 = 3 if opts.id3_v23 else 4
-            if v2 == 3:
-                tags.update_to_v23()
-            if isinstance(mf, (MP3, TrueAudio)):
-                tags.save(self.path, v1=2 if opts.write_id3v1 else 1, v2_version=v2)
+        def write(path):
+            mf = mutagen.File(path)
+            kind = _kind(mf)
+            if mf.tags is None:
+                mf.add_tags()
+            tags = mf.tags
+            if kind == "id3":
+                _id3_write(tags, changes, pictures, opts)
+                v2 = 3 if opts.id3_v23 else 4
+                if v2 == 3:
+                    tags.update_to_v23()
+                if isinstance(mf, (MP3, TrueAudio)):
+                    tags.save(path, v1=2 if opts.write_id3v1 else 1, v2_version=v2)
+                else:
+                    mf.save(v2_version=v2)
+            elif kind == "mp4":
+                _mp4_write(tags, changes, pictures)
+                mf.save()
+            elif kind == "flac":
+                _vorbis_write(tags, changes)
+                if pictures is not None:
+                    mf.clear_pictures()
+                    for p in pictures:
+                        mf.add_picture(_flac_pic(p))
+                mf.save()
+            elif kind == "ogg":
+                _vorbis_write(tags, changes)
+                if pictures is not None:
+                    _ogg_write_pics(tags, pictures)
+                mf.save()
+            elif kind == "ape":
+                _ape_write(tags, changes, pictures)
+                mf.save()
+            elif kind == "asf":
+                _asf_write(tags, changes, pictures)
+                mf.save()
             else:
-                mf.save(v2_version=v2)
-        elif kind == "mp4":
-            _mp4_write(tags, changes, pictures)
-            mf.save()
-        elif kind == "flac":
-            _vorbis_write(tags, changes)
-            if pictures is not None:
-                mf.clear_pictures()
-                for p in pictures:
-                    mf.add_picture(_flac_pic(p))
-            mf.save()
-        elif kind == "ogg":
-            _vorbis_write(tags, changes)
-            if pictures is not None:
-                _ogg_write_pics(tags, pictures)
-            mf.save()
-        elif kind == "ape":
-            _ape_write(tags, changes, pictures)
-            mf.save()
-        elif kind == "asf":
-            _asf_write(tags, changes, pictures)
-            mf.save()
-        else:
-            raise UnsupportedFile("쓰기를 지원하지 않는 형식")
+                raise UnsupportedFile("쓰기를 지원하지 않는 형식")
 
-        if opts.keep_mtime:
-            os.utime(self.path, (old.st_atime, old.st_mtime))
+        safe_modify(self.path, write, opts.safe_save, opts.keep_mtime)
         return AudioFile.load(self.path, opts)
 
     def remove_tags(self, opts: Options) -> "AudioFile":
-        old = os.stat(self.path)
-        mf = mutagen.File(self.path)
-        kind = _kind(mf)
-        if kind == "id3" and isinstance(mf, (MP3, TrueAudio)):
-            from mutagen.id3 import delete as id3_delete
-            id3_delete(self.path, delete_v1=True, delete_v2=True)
-        elif kind == "flac":
-            mf.delete()
-            mf.clear_pictures()
-            mf.save()
-        elif mf.tags is not None:
-            try:
+        def write(path):
+            mf = mutagen.File(path)
+            kind = _kind(mf)
+            if kind == "id3" and isinstance(mf, (MP3, TrueAudio)):
+                from mutagen.id3 import delete as id3_delete
+                id3_delete(path, delete_v1=True, delete_v2=True)
+            elif kind == "flac":
                 mf.delete()
-            except Exception:
-                mf.tags.clear()
+                mf.clear_pictures()
                 mf.save()
-        if opts.keep_mtime:
-            os.utime(self.path, (old.st_atime, old.st_mtime))
+            elif mf.tags is not None:
+                try:
+                    mf.delete()
+                except Exception:
+                    mf.tags.clear()
+                    mf.save()
+
+        safe_modify(self.path, write, opts.safe_save, opts.keep_mtime)
         return AudioFile.load(self.path, opts)
 
     def path_for_stem(self, new_stem: str) -> str:
@@ -903,7 +905,12 @@ def take_snapshot(path: str) -> Snapshot:
     return Snapshot(kind, data, had_v1, st.st_atime, st.st_mtime)
 
 
-def restore_snapshot(path: str, snap: Snapshot):
+def restore_snapshot(path: str, snap: Snapshot, safe: bool = True):
+    safe_modify(path, lambda p: _restore_into(p, snap), safe)
+    os.utime(path, (snap.atime, snap.mtime))
+
+
+def _restore_into(path: str, snap: Snapshot):
     mf = mutagen.File(path)
     kind = snap.kind
     if kind == "id3":
@@ -953,4 +960,3 @@ def restore_snapshot(path: str, snap: Snapshot):
             for k, v in snap.data.items():
                 mf.tags[k] = copy.deepcopy(v)
             mf.save()
-    os.utime(path, (snap.atime, snap.mtime))

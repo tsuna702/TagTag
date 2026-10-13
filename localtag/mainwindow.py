@@ -12,6 +12,8 @@ from PySide6.QtWidgets import (
 )
 
 from .actiondialogs import ActionEditDialog, ActionsDialog, PlansPreview, choose_action_type
+from .backup import BackupStore
+from .backupdialog import BackupDialog
 from .actions import ACTION_TYPES, ActionStore, describe, new_action, run_actions
 from .converters import CONVERTERS, AutoNumber
 from .export import ExportDialog, PlaylistDialog
@@ -39,12 +41,20 @@ class MainWindow(QMainWindow):
             write_id3v1=self.settings.value("write_id3v1", False, bool),
             cp949_fallback=self.settings.value("cp949_fallback", True, bool),
             keep_mtime=self.settings.value("keep_mtime", False, bool),
+            safe_save=self.settings.value("safe_save", True, bool),
         )
         self.recursive = self.settings.value("recursive", True, bool)
         self.last_dir = self.settings.value("last_dir", os.path.expanduser("~/Music"), str)
         self.undo_stack: list[UndoEntry] = []
         data_dir = QStandardPaths.writableLocation(QStandardPaths.AppDataLocation)
         self.actions = ActionStore(os.path.join(data_dir, "actions.json"))
+        self.backups = BackupStore(os.path.join(data_dir, "Backups"))
+        self.backup_enabled = self.settings.value("backup_enabled", True, bool)
+        try:
+            self.backups.prune(self.settings.value("backup_days", 30, int),
+                               self.settings.value("backup_max_gb", 5, int) * 1024 ** 3)
+        except OSError:
+            pass
 
         # ---- 파일 목록
         self.model = FileModel(self)
@@ -208,6 +218,10 @@ class MainWindow(QMainWindow):
                   checkable=True, checked=self.opts.cp949_fallback)
         self._act(m, "저장할 때 파일 수정 시각 유지", lambda on: self._set_opt("keep_mtime", on),
                   checkable=True, checked=self.opts.keep_mtime)
+        self._act(m, "안전하게 저장 (사본에 쓰고 오디오 검증 후 교체)", lambda on: self._set_opt("safe_save", on),
+                  checkable=True, checked=self.opts.safe_save)
+        m.addSeparator()
+        self._act(m, "백업…", self.show_backups, "Ctrl+Shift+B")
 
     def _set_opt(self, name, value):
         setattr(self.opts, name, value)
@@ -424,6 +438,12 @@ class MainWindow(QMainWindow):
                 self.panel.set_files(self.selected_files())
             return
         entry = UndoEntry(label)
+        job = None
+        if self.backup_enabled:
+            try:
+                job = self.backups.begin(label)
+            except OSError as e:
+                QMessageBox.warning(self, "백업", f"백업 폴더를 만들지 못해 백업 없이 저장합니다.\n{e}")
         failed = []
         prog = None
         if len(plans) > 10:
@@ -436,7 +456,10 @@ class MainWindow(QMainWindow):
             f = p.file
             old_path = f.path
             snap = None
+            bentry = None
             try:
+                if job is not None and (p.touches_tags or p.new_path):
+                    bentry = job.before(old_path, copy_file=p.touches_tags)
                 if p.touches_tags:
                     snap = take_snapshot(old_path)
                 new = f
@@ -450,12 +473,17 @@ class MainWindow(QMainWindow):
                     cur_path = p.new_path
                 entry.items.append(UndoItem(old_path, cur_path, snap))
                 snap = None
+                if bentry is not None:
+                    job.after(bentry, cur_path)
+                    bentry = None
                 self.model.replace(f, AudioFile.load(cur_path, self.opts))
                 for path, data in p.exports:
                     with open(path, "wb") as fh:
                         fh.write(data)
             except Exception as e:
                 failed.append((old_path, str(e)))
+                if bentry is not None:
+                    job.failed(bentry, str(e))
                 if snap is not None and os.path.exists(old_path):
                     # 일부만 바뀐 채로 남지 않게 되돌려 둔다
                     entry.items.append(UndoItem(old_path, old_path, snap))
@@ -465,6 +493,11 @@ class MainWindow(QMainWindow):
                     pass
         if prog:
             prog.close()
+        if job is not None:
+            try:
+                job.finish()
+            except OSError:
+                pass
         if entry.items:
             self._push_undo(entry)
         if refresh_panel:
@@ -472,6 +505,27 @@ class MainWindow(QMainWindow):
         self._update_status()
         self._report_failures(failed, "처리하지 못한 파일")
         self.statusBar().showMessage(f"{label}: {len(plans) - len(failed)}개 파일에 적용했습니다.", 5000)
+
+    # ------------------------------------------------------------ 백업
+    def show_backups(self):
+        self._confirm_pending()
+        BackupDialog(self).exec()
+
+    def after_backup_restore(self, done):
+        """백업에서 되돌린 파일을 목록에 다시 읽어 들인다."""
+        by_path = {f.path: f for f in self.model.files}
+        for cur, orig in done:
+            f = by_path.get(cur)
+            if f is not None:
+                try:
+                    self.model.replace(f, AudioFile.load(orig, self.opts))
+                except Exception:
+                    pass
+        # 파일이 메모리 속 실행 취소 기록과 달라졌으므로 기록을 비운다
+        self.undo_stack.clear()
+        self._update_undo_action()
+        self.panel.set_files(self.selected_files())
+        self._update_status()
 
     # ------------------------------------------------------------ 실행 취소
     def _push_undo(self, entry):
