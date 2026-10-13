@@ -12,7 +12,9 @@ from PySide6.QtWidgets import (
 )
 
 from .actiondialogs import ActionEditDialog, ActionsDialog, PlansPreview, choose_action_type
+from . import music
 from .artworkdialog import ArtworkDialog
+from .tasks import run_task
 from .backup import BackupStore
 from .backupdialog import BackupDialog
 from .actions import ACTION_TYPES, ActionStore, describe, new_action, run_actions
@@ -203,6 +205,16 @@ class MainWindow(QMainWindow):
         self._act(m, "앨범아트 찾기 · 가져오기…", self.find_artwork, "Ctrl+Shift+A")
         self._act(m, "커버 크기 조정…", self.resize_covers, "Ctrl+Shift+K")
 
+        m = mb.addMenu("Music")
+        self._act(m, "Apple Music에 반영 (새로 읽기)", self.music_refresh, "Ctrl+Shift+M")
+        self._act(m, "저장한 뒤 자동으로 Music에 반영", lambda on: self.settings.setValue("music_auto", on),
+                  checkable=True, checked=self.settings.value("music_auto", False, bool))
+        m.addSeparator()
+        self._act(m, "Music에서 선택한 곡 추가", self.music_add_selection, "Ctrl+Shift+I")
+        m.addSeparator()
+        self._act(m, "Music 권한 확인", self.music_check)
+        self._act(m, "Music 권한 설정 열기…", music.open_privacy_settings)
+
         m = mb.addMenu("액션")
         self._act(m, "액션 그룹…", self.run_action_groups, "Alt+6")
         self._act(m, "빠른 액션…", self.quick_action, "Alt+7")
@@ -259,6 +271,8 @@ class MainWindow(QMainWindow):
         m.addAction("Finder에서 보기", self.reveal)
         m.addSeparator()
         m.addAction("확장 태그…", self.extended_tags)
+        m.addAction("앨범아트 찾기…", self.find_artwork)
+        m.addAction("Apple Music에 반영", self.music_refresh)
         m.addAction("재생목록 만들기…", self.make_playlist)
         m.addAction("내보내기…", self.export_list)
         m.addSeparator()
@@ -372,8 +386,47 @@ class MainWindow(QMainWindow):
             prog.close()
         return loaded, failed
 
+    def _find_moved(self, files):
+        """사라진 파일을 같은 디스크에서 inode로 찾는다 (Music이 폴더를 정리한 경우 등)."""
+        missing = {(f.dev, f.ino): f for f in files if f.ino and not os.path.exists(f.path)}
+        found = {}
+        if not missing:
+            return found
+        roots = set()
+        for f in missing.values():
+            root = os.path.dirname(f.path)
+            for name in ("Media", "Media.localized", "Music Media", "iTunes Media"):
+                i = f.path.find("/" + name + "/")
+                if i >= 0:
+                    root = f.path[:i + len(name) + 1]
+                    break
+            else:
+                root = os.path.dirname(root)  # 앨범 폴더 이름이 바뀐 경우를 위해 한 단계 위부터
+            roots.add(root)
+        for root in sorted(roots):
+            for d, dirs, names in os.walk(root):
+                dirs[:] = [x for x in dirs if not x.startswith(".")]
+                for n in names:
+                    p = os.path.join(d, n)
+                    try:
+                        st = os.stat(p)
+                    except OSError:
+                        continue
+                    f = missing.pop((st.st_dev, st.st_ino), None)
+                    if f is not None:
+                        found[f.path] = p
+                if not missing:
+                    return found
+        return found
+
     def refresh(self):
         self._confirm_pending()
+        moved = self._find_moved(self.model.files)
+        for f in self.model.files:
+            if f.path in moved:
+                f.path = moved[f.path]
+        if moved:
+            self.statusBar().showMessage(f"옮겨진 파일 {len(moved)}개를 다시 찾았습니다.", 6000)
         paths = [f.path for f in self.model.files if os.path.exists(f.path)]
         selected = {f.path for f in self.selected_files()}
         loaded, failed = self._load_files(paths, "다시 읽는 중…")
@@ -506,6 +559,9 @@ class MainWindow(QMainWindow):
                 pass
         if entry.items:
             self._push_undo(entry)
+            if self.settings.value("music_auto", False, bool):
+                changed = [i.new_path for i in entry.items]
+                self._music_refresh_paths(changed, modal=False)
         if refresh_panel:
             self.panel.set_files(self.selected_files())
         self._update_status()
@@ -634,6 +690,109 @@ class MainWindow(QMainWindow):
             return
         self.apply_plans([Plan(f, remove_tags=True) for f in files], "태그 제거")
 
+    # ------------------------------------------------------------ Apple Music
+    def music_refresh(self):
+        files = self._files_for_command()
+        if files:
+            self._music_refresh_paths([f.path for f in files], modal=True)
+
+    def _music_refresh_paths(self, paths, modal=True):
+        if getattr(self, "_music_busy", False):
+            self.statusBar().showMessage("Music 작업이 이미 진행 중입니다.", 4000)
+            return
+        self._music_busy = True
+
+        def done(res):
+            self._music_busy = False
+            (total, refreshed, skipped, failed), relocated, warnings = res
+            moved = self._relink(relocated)
+            msg = f"Music에 반영: {refreshed}곡 새로 읽음"
+            if skipped:
+                msg += f" · 보관함에 없음 {skipped}곡"
+            if failed:
+                msg += f" · 실패 {failed}곡"
+            if moved:
+                msg += f" · 옮겨진 파일 {moved}개 다시 연결"
+            self.statusBar().showMessage(msg, 8000)
+            if modal:
+                text = msg.replace(" · ", "\n")
+                if warnings:
+                    text += "\n\n경로 확인 경고:\n" + "\n".join(warnings[:5])
+                QMessageBox.information(self, "Apple Music", text)
+
+        def fail(msg):
+            self._music_busy = False
+            if modal or "권한" in msg:
+                self._music_error(msg)
+            else:
+                self.statusBar().showMessage(f"Music 자동 반영 실패: {msg}", 8000)
+
+        run_task(self, "Apple Music에 반영", lambda prog, cancelled: music.refresh(paths, prog, cancelled),
+                 done, fail, modal=modal, status=lambda m: self.statusBar().showMessage(m, 3000))
+
+    def _music_error(self, msg):
+        box = QMessageBox(QMessageBox.Warning, "Apple Music", msg, QMessageBox.Ok, self)
+        if "권한" in msg:
+            b = box.addButton("권한 설정 열기", QMessageBox.ActionRole)
+            box.exec()
+            if box.clickedButton() is b:
+                music.open_privacy_settings()
+        else:
+            box.exec()
+
+    def _relink(self, relocated):
+        """Music이 파일을 옮긴 경우 목록의 경로를 새 위치로 바꾼다."""
+        by_path = {os.path.realpath(f.path): f for f in self.model.files}
+        moved = 0
+        for old, new in relocated.items():
+            f = by_path.get(old)
+            if f is None or os.path.realpath(new) == os.path.realpath(f.path) or not os.path.exists(new):
+                continue
+            try:
+                self.model.replace(f, AudioFile.load(new, self.opts))
+                moved += 1
+            except Exception:
+                pass
+        if moved:
+            self.panel.set_files(self.selected_files())
+        return moved
+
+    def music_check(self):
+        run_task(self, "Music 권한 확인", lambda prog, cancelled: music.ensure_access(launch=True),
+                 lambda _: QMessageBox.information(self, "Apple Music", "Music을 제어할 수 있습니다."),
+                 self._music_error)
+
+    def music_add_selection(self):
+        run_task(self, "Music에서 선택한 곡 읽기", lambda prog, cancelled: music.selected_paths(),
+                 lambda paths: self.load_paths(paths, replace=False), self._music_error)
+
+    def _drop_from_music(self):
+        try:
+            paths, albums = music.read_music_drag()
+        except Exception as e:
+            QMessageBox.warning(self, "Apple Music", f"Music에서 끌어온 항목을 읽지 못했습니다.\n{e}")
+            return
+        if not albums:
+            if paths:
+                self.load_paths(paths, replace=False)
+            else:
+                QMessageBox.information(self, "Apple Music", "이 Mac에 파일이 있는 곡이 없습니다 (클라우드 곡일 수 있습니다).")
+            return
+
+        def done(res):
+            found, errors = res
+            if paths + found:
+                self.load_paths(paths + found, replace=False)
+            if errors:
+                QMessageBox.information(self, "Apple Music", "\n".join(errors[:15]))
+        run_task(self, "Music 앨범의 곡 찾기",
+                 lambda prog, cancelled: music.album_paths(albums, cancelled), done, self._music_error)
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        if not getattr(self, "_drop_registered", False):
+            self._drop_registered = music.register_drop_types(self)
+
     # ------------------------------------------------------------ 앨범아트
     def find_artwork(self):
         files = self._files_for_command()
@@ -737,10 +896,18 @@ class MainWindow(QMainWindow):
         return [u.toLocalFile() for u in e.mimeData().urls() if u.isLocalFile()]
 
     def dragEnterEvent(self, e):
-        if e.mimeData().hasUrls():
+        if e.mimeData().hasUrls() or music.drag_has_music():
+            e.acceptProposedAction()
+
+    def dragMoveEvent(self, e):
+        if e.mimeData().hasUrls() or music.drag_has_music():
             e.acceptProposedAction()
 
     def dropEvent(self, e):
+        if music.drag_has_music():
+            e.acceptProposedAction()
+            self._drop_from_music()
+            return
         paths = self._drop_paths(e)
         if paths:
             self.load_paths(paths, replace=False)
@@ -751,10 +918,14 @@ class MainWindow(QMainWindow):
             self.table.setFocus()
             return True
         if obj is self.table.viewport():
-            if e.type() in (QEvent.DragEnter, QEvent.DragMove) and e.mimeData().hasUrls():
+            if e.type() in (QEvent.DragEnter, QEvent.DragMove) and (e.mimeData().hasUrls() or music.drag_has_music()):
                 e.acceptProposedAction()
                 return True
             if e.type() == QEvent.Drop:
+                if music.drag_has_music():
+                    e.acceptProposedAction()
+                    self._drop_from_music()
+                    return True
                 paths = self._drop_paths(e)
                 if paths:
                     self.load_paths(paths, replace=False)

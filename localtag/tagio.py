@@ -644,6 +644,8 @@ class AudioFile:
     tag_type: str = ""
     size: int = 0
     mtime: float = 0.0
+    dev: int = 0
+    ino: int = 0
 
     # ---- 표시용
     @property
@@ -693,6 +695,7 @@ class AudioFile:
         af = cls(path=path)
         st = os.stat(path)
         af.size, af.mtime = st.st_size, st.st_mtime
+        af.dev, af.ino = st.st_dev, st.st_ino
         info = mf.info
         af.length = float(getattr(info, "length", 0) or 0)
         af.bitrate = int(getattr(info, "bitrate", 0) or 0)
