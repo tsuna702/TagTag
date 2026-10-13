@@ -8,7 +8,8 @@ from PySide6.QtCore import QEvent, QItemSelectionModel, QSettings, QStandardPath
 from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QFileDialog, QHeaderView, QLabel, QLineEdit, QMainWindow,
-    QMenu, QMessageBox, QProgressDialog, QScrollArea, QSplitter, QTableView, QVBoxLayout, QWidget,
+    QMenu, QMessageBox, QProgressDialog, QPushButton, QScrollArea, QSplitter, QTableView, QToolBar,
+    QVBoxLayout, QWidget,
 )
 
 from .actiondialogs import ActionEditDialog, ActionsDialog, PlansPreview, choose_action_type
@@ -99,6 +100,7 @@ class MainWindow(QMainWindow):
         self.panel = TagPanel()
         self.panel.saveRequested.connect(self.save)
         self.panel.artworkRequested.connect(self.find_artwork)
+        self.panel.changed.connect(self._update_toolbar)
         scroll = QScrollArea()
         scroll.setWidget(self.panel)
         scroll.setWidgetResizable(True)
@@ -137,6 +139,7 @@ class MainWindow(QMainWindow):
         self.setAcceptDrops(True)
 
         self._build_menus()
+        self._build_toolbar()
         geo = self.settings.value("geometry")
         if geo is not None:
             self.restoreGeometry(geo)
@@ -241,6 +244,43 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         self._act(m, "백업…", self.show_backups, "Ctrl+Shift+B")
 
+    def _build_toolbar(self):
+        tb = QToolBar("도구 막대")
+        tb.setObjectName("main_toolbar")
+        tb.setMovable(False)
+        tb.setFloatable(False)
+        tb.setContextMenuPolicy(Qt.PreventContextMenu)
+        self.addToolBar(Qt.TopToolBarArea, tb)
+
+        def button(text, slot, tip):
+            b = QPushButton(text)
+            b.setToolTip(tip)
+            b.setFocusPolicy(Qt.NoFocus)  # 입력칸에서 쓰던 포커스를 빼앗지 않도록
+            b.clicked.connect(lambda _=False: slot())
+            tb.addWidget(b)
+            return b
+
+        self.tb_save = button("저장", self.save, "바꾼 태그 저장 (⌘S)")
+        self.tb_undo = button("되돌리기", self.undo, "마지막 작업 되돌리기 (⌘Z)")
+        tb.addSeparator()
+        self.tb_refresh = button("새로고침", self.refresh, "목록의 파일을 다시 읽기 (F5)")
+        self.tb_clear = button("목록 지우기", self.clear_list, "목록 비우기 — 파일은 지우지 않습니다")
+        tb.addSeparator()
+        self.tb_finder = button("Finder에서 보기", self.reveal, "선택한 파일을 Finder에서 보기 (⇧⌘R)")
+        self._update_toolbar()
+
+    def _update_toolbar(self):
+        if not hasattr(self, "tb_save"):
+            return
+        has_files = bool(self.model.files)
+        self.tb_save.setEnabled(self.panel.is_dirty())
+        self.tb_undo.setEnabled(bool(self.undo_stack))
+        self.tb_undo.setToolTip(f"되돌리기: {self.undo_stack[-1].label} (⌘Z)" if self.undo_stack
+                                else "되돌릴 작업이 없습니다")
+        self.tb_refresh.setEnabled(has_files)
+        self.tb_clear.setEnabled(has_files)
+        self.tb_finder.setEnabled(bool(self.table.selectionModel().selectedRows()))
+
     def _set_opt(self, name, value):
         setattr(self.opts, name, value)
         self.settings.setValue(name, value)
@@ -328,6 +368,7 @@ class MainWindow(QMainWindow):
         count = f"표시 {shown} / 전체 {len(self.model.files)}개" if self.proxy.filter_fn else f"전체 {len(self.model.files)}개"
         prefix = f"{len(sel)}개 선택 · {count}" if sel else count
         self.status.setText(f"{prefix}  |  {fmt_length(total)}  |  {fmt_size(size)}")
+        self._update_toolbar()
 
     # ------------------------------------------------------------ 불러오기
     def open_folder(self):
@@ -604,6 +645,7 @@ class MainWindow(QMainWindow):
         else:
             self.undo_act.setText("실행 취소")
             self.undo_act.setEnabled(False)
+        self._update_toolbar()
 
     def undo(self):
         if not self.undo_stack:

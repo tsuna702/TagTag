@@ -68,6 +68,7 @@ class CoverLabel(QLabel):
 class TagPanel(QWidget):
     saveRequested = Signal()
     artworkRequested = Signal()
+    changed = Signal()  # 입력값이나 커버를 바꿨을 때 (저장 버튼 상태 갱신용)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -89,6 +90,7 @@ class TagPanel(QWidget):
             cb.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             cb.setMinimumContentsLength(12)
             cb.lineEdit().returnPressed.connect(self.saveRequested)
+            cb.editTextChanged.connect(lambda _: self.changed.emit())
             self.combos[name] = cb
         for name in FIELDS:
             form.addRow(FIELD_LABELS[name] + ":", self.combos[name])
@@ -169,6 +171,10 @@ class TagPanel(QWidget):
         return True, first
 
     def _show_cover(self):
+        self._draw_cover()
+        self.changed.emit()
+
+    def _draw_cover(self):
         self.cover.setPixmap(QPixmap())
         if not self.files:
             self.cover.setText("")
