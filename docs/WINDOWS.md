@@ -69,6 +69,12 @@ Windows DLL 이름은 `Qt6Quick.dll` 처럼 `Qt6` 으로 시작해서 DROP 목�
 - **B. GitHub Actions:** `.github/workflows/windows.yml` — 태그가 올라오면 windows-latest 에서 빌드해 릴리스에 붙인다.
   저장소에 워크플로를 올리는 일이라 **사용자에게 먼저 묻는다.**
 
+**정함 (2026-10-14): A.** `.\release_win.ps1` — windows 브랜치·커밋 안 한 변경 없음 확인 → 빌드 → push →
+같은 태그가 있으면 zip 을 붙이고 노트 끝에 "Windows 판"(그 태그 이후 windows 브랜치 커밋)과 설치 안내를 더한다.
+이미 Windows zip 이 붙어 있으면 멈춘다. 태그가 없으면 windows 브랜치를 대상으로 새로 만든다
+(그러면 맥의 release.sh 는 같은 태그가 있어 멈추므로, 보통은 맥에서 먼저 릴리스하고 Windows 를 붙인다).
+필요: `gh` (winget install GitHub.cli) 와 사용자가 직접 한 `gh auth login`.
+
 설치 안내 (릴리스 노트): zip 을 풀고 `LocalTag.exe` 실행. 서명하지 않은 앱이라 처음에 "Windows의 PC 보호" 가 뜨면
 **추가 정보 → 실행**.
 

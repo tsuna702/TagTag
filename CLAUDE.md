@@ -17,7 +17,7 @@ Mp3tag 를 본뜬 음악 태그 편집기. Python 3 + PySide6(Qt) + mutagen. Git
    - 릴리스 노트는 지난 태그 이후 **커밋 제목**으로 자동으로 만든다 → 제목을 사용자가 읽을 수 있게 쓴다
      (예: `태그 비교(⇧⌘D) 추가 — 고른 곡을 나란히 놓고 다른 줄을 노란색으로 (0.8.0)`).
    - macOS: `./release.sh` (빌드 → zip → `gh release create`). 커밋 안 한 변경이 있거나 같은 태그가 있으면 멈춘다.
-   - Windows: 릴리스 방식은 docs/WINDOWS.md 의 "릴리스" 를 따른다 (아직 만드는 중).
+   - Windows: `.\release_win.ps1` (windows 브랜치에서. 같은 버전 릴리스에 Windows zip 을 붙인다 — docs/WINDOWS.md 의 "릴리스").
    - 커밋 끝에 `Co-Authored-By:` 줄을 붙인다.
 2. **테스트는 사용자의 실제 환경을 건드리지 않는다.** `tests/harness.py` 를 쓴다.
    - 설정은 임시 INI 로 바꿔 끼운다. 실제 설정(macOS plist, Windows 레지스트리 `HKCU\Software\LocalTag`)에 `clear()` 금지.
