@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
 )
 
 from .plan import Plan
+from .rowdrag import RowDragger, move_to
 from .script import HELP_HTML, Context, Pattern, ScriptError, evaluate, split_values
 from .tagio import FIELD_LABELS, FIELDS, SEP, AudioFile, nfc
 
@@ -593,7 +594,7 @@ class AutoNumber(ConverterDialog):
             b.setAutoDefault(False)
             b.clicked.connect(lambda _=False, d=delta: self.move(d))
             row.addWidget(b)
-        hint = QLabel("표에서 곡을 골라 순서를 바꾸면 번호가 바로 다시 매겨집니다 (목록 순서도 함께 바뀝니다)")
+        hint = QLabel("표에서 곡을 골라 끌어다 놓거나 버튼으로 옮기면 번호가 바로 다시 매겨집니다 (목록 순서도 함께 바뀝니다)")
         hint.setStyleSheet("color: gray;")
         row.addWidget(hint, 1)
         self.form.addRow("순서:", row)
@@ -610,6 +611,16 @@ class AutoNumber(ConverterDialog):
             # 맨 끝에 닿은 곡이 있으면 넘어가지 않는다 (고른 곡끼리의 순서는 그대로)
             if id(order[i]) in picked and 0 <= j < len(order) and id(order[j]) not in picked:
                 order[i], order[j] = order[j], order[i]
+        self._set_order(order, picked)
+
+    def _drop_rows(self, target):
+        """표에서 끌어다 놓기: 고른 곡을 target 줄 앞으로."""
+        rows = {i.row() for i in self.table.selectionModel().selectedRows()}
+        picked = {id(self.plans[r].file) for r in rows if r < len(self.plans)}
+        if picked:
+            self._set_order(move_to(self.files, picked, target), picked)
+
+    def _set_order(self, order, picked):
         if all(a is b for a, b in zip(order, self.files)):
             return
         self.files = order
@@ -624,6 +635,11 @@ class AutoNumber(ConverterDialog):
 
     def headers(self):
         return ["파일명", "현재 트랙", "새 트랙", "디스크", "상태"]
+
+    def refresh(self):
+        super().refresh()
+        if not hasattr(self, "_dragger"):
+            self._dragger = RowDragger(self.table, self._drop_rows)
 
     def make_plans(self):
         groups = []

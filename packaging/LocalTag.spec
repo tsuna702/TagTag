@@ -40,8 +40,8 @@ app = BUNDLE(
     bundle_identifier="io.github.tsuna702.localtag",
     info_plist={
         "CFBundleDisplayName": "LocalTag",
-        "CFBundleShortVersionString": "0.7.2",
-        "CFBundleVersion": "0.7.2",
+        "CFBundleShortVersionString": "0.7.3",
+        "CFBundleVersion": "0.7.3",
         "NSHighResolutionCapable": True,
         "LSApplicationCategoryType": "public.app-category.music",
         "NSHumanReadableCopyright": "LocalTag",

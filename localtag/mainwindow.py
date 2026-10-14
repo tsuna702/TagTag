@@ -23,6 +23,7 @@ from .filetrack import find_moved
 from .filterexpr import FilterError, compile_filter
 from .model import COLUMN_WIDTHS, COLUMNS, FileModel, SortProxy, fmt_length, fmt_size
 from .panel import TagPanel, changes_for
+from .rowdrag import RowDragger, move_to
 from .plan import Plan, UndoEntry, UndoItem
 from .tagio import (
     AUDIO_EXTS, AudioFile, Options, move_file, restore_snapshot, scan,
@@ -170,6 +171,8 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self.status)
         self.setAcceptDrops(True)
 
+        # 고른 곡을 끌어다 다른 위치에 놓아 순서 바꾸기 (필터를 쓰는 중에는 끌 수 없다)
+        self._row_drag = RowDragger(self.table, self._drop_rows, can_drag=lambda: self.proxy.filter_fn is None)
         self._build_menus()
         self._build_toolbar()
         geo = self.settings.value("geometry")
@@ -474,6 +477,16 @@ class MainWindow(QMainWindow):
             self.table.horizontalHeader().setSortIndicator(-1, Qt.AscendingOrder)
         if self.model.move(files, delta):
             self.table.scrollTo(self.proxy.index(self.model.row_of(files[0 if delta < 0 else -1]), 0))
+            self.statusBar().showMessage("목록 순서를 바꿨습니다. '트랙 번호…'로 이 순서대로 번호를 매길 수 있습니다.", 5000)
+
+    def _drop_rows(self, target):
+        """목록에서 끌어다 놓기: 고른 곡을 target 줄 앞으로 (필터가 없을 때 표의 행 = 원본 행)."""
+        files = self.selected_files()
+        if not files:
+            return
+        if self.model.sort_column >= 0:
+            self.table.horizontalHeader().setSortIndicator(-1, Qt.AscendingOrder)
+        if self.model.set_order(move_to(self.model.files, {id(f) for f in files}, target)):
             self.statusBar().showMessage("목록 순서를 바꿨습니다. '트랙 번호…'로 이 순서대로 번호를 매길 수 있습니다.", 5000)
 
     def number_tracks(self):

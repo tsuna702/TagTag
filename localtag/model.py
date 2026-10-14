@@ -151,6 +151,11 @@ class FileModel(QAbstractTableModel):
                 order[i], order[j] = order[j], order[i]
         return self._reorder(order)
 
+    def set_order(self, files) -> bool:
+        """같은 파일들을 새 순서로 (직접 정한 순서가 된다)."""
+        self.sort_column = -1
+        return self._reorder(list(files))
+
     def arrange(self, files) -> bool:
         """files 가 차지하던 자리에 files 를 주어진 순서로 다시 놓는다 (다른 곡의 위치는 그대로)."""
         ids = {id(f) for f in files}
