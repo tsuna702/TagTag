@@ -302,9 +302,20 @@ def media_library_status() -> str:
         return "unknown"
 
 
-def request_media_library(cancelled=lambda: False, timeout=180) -> bool:
-    """macOS 권한 창을 띄워 'Apple Music 보관함 접근'을 받는다. 사용자가 답할 때까지 기다린다 (작업 스레드에서 부를 것).
-    허용되면 True."""
+_media_requested = False
+
+
+def request_media_library(cancelled=lambda: False) -> bool:
+    """macOS 권한 창을 띄워 'Apple Music 보관함 접근'을 받는다 (작업 스레드에서 부를 것). 앱을 켠 동안 한 번만 한다.
+    보관함을 열었으면 True.
+
+    권한 상태(TCCAccessPreflight)는 앱 안에서 기억되어, 허용한 뒤에도 앱을 다시 켤 때까지 '아직 묻지 않음'으로
+    보일 수 있다. 그래서 상태가 바뀌기를 기다리지 않는다 (0.6.6 에서 허용 후에도 진행 창이 닫히지 않던 문제).
+    """
+    global _media_requested
+    if _media_requested:
+        return True
+    _media_requested = True
     try:
         o = _bridge()
         ctypes.cdll.LoadLibrary("/System/Library/Frameworks/iTunesLibrary.framework/iTunesLibrary")
@@ -313,17 +324,13 @@ def request_media_library(cancelled=lambda: False, timeout=180) -> bool:
         pool = o.lib.objc_autoreleasePoolPush()
         try:
             err = ctypes.c_void_p()
-            o.send(o.cls("ITLibrary"), "libraryWithAPIVersion:error:", o.nsstr("1.0"), ctypes.byref(err),
-                   argtypes=[ctypes.c_void_p, ctypes.c_void_p])
+            lib = o.send(o.cls("ITLibrary"), "libraryWithAPIVersion:error:", o.nsstr("1.0"), ctypes.byref(err),
+                         argtypes=[ctypes.c_void_p, ctypes.c_void_p])
+            return bool(lib)
         finally:
             o.lib.objc_autoreleasePoolPop(pool)
     except Exception:
         return False
-    # 권한 창이 따로 떠 있는 동안에는 답할 때까지 기다린다
-    end = time.monotonic() + timeout
-    while media_library_status() == "ask" and time.monotonic() < end and not cancelled():
-        time.sleep(0.3)
-    return media_library_status() == "granted"
 
 
 def open_privacy_settings(kind: str = "automation"):

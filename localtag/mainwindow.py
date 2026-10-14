@@ -1059,7 +1059,7 @@ class MainWindow(QMainWindow):
                 music.request_media_library(cancelled)
             if need_auto:
                 music.ensure_access(launch=True)
-            return music.media_library_status()
+            return media  # 허용 여부는 앱 안에서 바로 갱신되지 않으므로 처음 상태를 돌려준다
 
         def done(media_now):
             self.settings.setValue("perm/asked_version", ver)
