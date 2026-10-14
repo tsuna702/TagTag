@@ -6,7 +6,7 @@ Set-Location $PSScriptRoot
 $Repo = "tsuna702/TagTag"
 
 function Fail($msg) { Write-Host $msg -ForegroundColor Red; exit 1 }
-function Git { & git @args; if ($LASTEXITCODE) { Fail "git $($args -join ' ') 실패" } }
+function Invoke-Git { & git.exe @args; if ($LASTEXITCODE) { Fail "git $($args -join ' ') 실패" } }
 
 if (-not (Get-Command gh -ErrorAction SilentlyContinue)) { Fail "gh 가 없습니다. winget install GitHub.cli 후 gh auth login 을 해 주세요." }
 & gh auth status *> $null
@@ -21,7 +21,7 @@ if ($d1 -or $d2) { Fail "커밋하지 않은 변경이 있습니다. 먼저 커�
 $Version = (Select-String -Path packaging\LocalTag.spec -Pattern '"CFBundleShortVersionString":\s*"([^"]+)"').Matches[0].Groups[1].Value
 $Tag = "v$Version"
 $Zip = "dist\LocalTag-$Version-windows.zip"
-Git fetch -q --tags origin
+Invoke-Git fetch -q --tags origin
 
 & gh release view $Tag --repo $Repo *> $null
 $exists = ($LASTEXITCODE -eq 0)
@@ -58,7 +58,7 @@ if ($exists) {
 }
 [IO.File]::WriteAllLines($notes, [string[]]$lines, (New-Object Text.UTF8Encoding $false))
 
-Git push -q origin windows
+Invoke-Git push -q origin windows
 if ($exists) {
     gh release upload $Tag $Zip --repo $Repo
     if ($LASTEXITCODE) { Fail "zip 올리기 실패" }
