@@ -62,17 +62,37 @@ end run
 
 # persistent ID 로 곡을 찾아 현재 Music에 보이는 정보를 읽거나(read), 다시 새로 읽게 한다(refresh).
 #   read:    인자 = read, <pid>, <pid>, …
-#   refresh: 인자 = refresh, <pid>, <제목>, <앨범>, <pid>, <제목>, <앨범>, …
+#   refresh: 인자 = refresh, <최소 대기 칸>, <최대 대기 칸>, <pid>, <제목>, <앨범>, <pid>, <제목>, <앨범>, …
+#            (한 칸 = 0.2초)
 #   LOCALTAG_INFO:<pid>\t<제목>\t<앨범>\t<경로>
-# 새로 읽기는 한 곡씩 Music이 새 제목·앨범을 보여 줄 때까지(최소 0.8초, 최대 3초) 기다린 뒤 다음 곡으로 넘어간다.
-# 앨범 이름을 바꾸면 Music이 곡을 하나씩 새 앨범으로 옮기는데, 너무 빨리 몰아 보내면 앨범 화면이 따라오지 못해
-# Music을 다시 켤 때까지 앨범이 갈라져 보인다 (앨범태그는 곡마다 보관함 검색이 끼어 있어 저절로 약 0.8초 간격이었다).
+# 새로 읽기는 한 곡씩, Music이 그 곡을 다 처리할 때까지 기다린 뒤 다음 곡으로 넘어간다:
+#   - 최소 대기 시간이 지났고
+#   - Music에 새 제목·앨범이 보이고
+#   - Music이 알려 주는 파일 위치가 더 이상 바뀌지 않으며(앨범명이 바뀌면 Music이 파일을 새 앨범 폴더로 옮긴다)
+#     그 자리에 실제로 파일이 있을 때.
+# 너무 빨리 몰아 보내면 Music 앨범 화면이 따라오지 못해 Music을 다시 켤 때까지 곡이 다른 앨범으로 갈라져 보인다.
 ID_SCRIPT = '''
+on fileExists(p)
+    try
+        (POSIX file p) as alias
+        return true
+    on error
+        return false
+    end try
+end fileExists
+
 on run arguments
     set mode to item 1 of arguments
     set args to rest of arguments
     set stepCount to 1
-    if mode is "refresh" then set stepCount to 3
+    set minTicks to 0
+    set maxTicks to 0
+    if mode is "refresh" then
+        set stepCount to 3
+        set minTicks to (item 1 of args) as integer
+        set maxTicks to (item 2 of args) as integer
+        set args to rest of (rest of args)
+    end if
     set i to 0
     tell application "Music"
         repeat with k from 1 to (count of args) by stepCount
@@ -84,9 +104,21 @@ on run arguments
                         set wantName to item (k + 1) of args
                         set wantAlbum to item (k + 2) of args
                         refresh t
-                        repeat with tick from 1 to 15
+                        set lastLoc to ""
+                        set steady to 0
+                        repeat with tick from 1 to maxTicks
                             delay 0.2
-                            if tick >= 4 then
+                            set curLoc to ""
+                            try
+                                set curLoc to POSIX path of (get location of t)
+                            end try
+                            if curLoc is not "" and curLoc is lastLoc and (my fileExists(curLoc)) then
+                                set steady to steady + 1
+                            else
+                                set steady to 0
+                            end if
+                            set lastLoc to curLoc
+                            if tick >= minTicks and steady >= 2 then
                                 if wantName is "" and wantAlbum is "" then exit repeat
                                 if (name of t as text) is wantName and (album of t as text) is wantAlbum then exit repeat
                             end if
@@ -110,6 +142,12 @@ on run arguments
     return "DONE"
 end run
 '''
+
+# 반영 속도: 곡 하나를 새로 읽게 한 뒤 다음 곡까지 (최소, 최대) 기다리는 시간(초)
+PACES = {"fast": (0.8, 4.0), "normal": (1.5, 6.0), "slow": (3.0, 10.0)}
+PACE_LABELS = {"fast": "빠르게 (곡마다 0.8초 이상)", "normal": "보통 (곡마다 1.5초 이상)",
+               "slow": "천천히 (곡마다 3초 이상)"}
+DEFAULT_PACE = "slow"
 
 PREFLIGHT = '''
 tell application "Music"
@@ -333,7 +371,7 @@ def _lookup(cur, keys, progress, cancelled):
 
 
 def refresh(paths, progress=lambda *_: None, cancelled=lambda: False, expected=None, rounds=3,
-            relocate=None):
+            relocate=None, pace=DEFAULT_PACE):
     """바꾼 파일을 Music에서 다시 읽게 하고, 실제로 반영됐는지 확인한다.
 
     1) 경로로 곡을 모두 찾아 persistent ID 를 얻는다 (아직 아무것도 반영하지 않음)
@@ -342,7 +380,10 @@ def refresh(paths, progress=lambda *_: None, cancelled=lambda: False, expected=N
 
     expected: {경로: (제목, 앨범)}
     relocate: 옮겨진 파일의 새 경로를 찾는 함수 ([경로] → {옛 경로: 새 경로}). 찾기 재시도 전에 부른다.
+    pace: 반영 속도 (PACES 의 키)
     """
+    min_wait, max_wait = PACES.get(pace, PACES[DEFAULT_PACE])
+    ticks = [str(max(1, round(min_wait / 0.2))), str(max(2, round(max_wait / 0.2)))]
     keys = list(dict.fromkeys(os.path.realpath(p) for p in paths))
     if not keys:
         raise MusicError("Music에 반영할 곡을 선택해 주세요.")
@@ -394,7 +435,7 @@ def refresh(paths, progress=lambda *_: None, cancelled=lambda: False, expected=N
         if rnd == 0:
             mode, msg = "refresh", "Music에서 새로 읽는 중"
         else:
-            time.sleep(1.5 if rnd == 1 else 2.5)  # Music이 파일을 다시 읽을 시간
+            time.sleep(max(1.5, min_wait) if rnd == 1 else 2.5 + min_wait)  # Music이 마저 정리할 시간
             mode = "read" if rnd == 1 else "refresh"
             msg = "Music에 반영됐는지 확인하는 중" if rnd == 1 else f"아직 옛 정보인 곡 다시 반영 ({rnd - 1}/{rounds})"
         ids = list(dict.fromkeys(pending.values()))
@@ -402,11 +443,12 @@ def refresh(paths, progress=lambda *_: None, cancelled=lambda: False, expected=N
             want = {}
             for k, pid in pending.items():
                 want.setdefault(pid, expected.get(k) or ("", ""))
-            args = [x for pid in ids for x in (pid, *want[pid])]
+            args = ticks + [x for pid in ids for x in (pid, *want[pid])]
         else:
             args = ids
         lines = _run_script(ID_SCRIPT, [mode, *args],
-                            lambda n, total=len(ids), msg=msg: progress(n, total, f"{msg} ({n}/{total})"), cancelled)
+                            lambda n, total=len(ids), msg=msg: progress(n, total, f"{msg} ({n}/{total})"), cancelled,
+                            idle_limit=240 + max_wait)
         if rnd == 0:
             continue  # 새로 읽기 직후 정보는 아직 옛것일 수 있으므로 확인은 다음 단계에서
         if rnd >= 2:

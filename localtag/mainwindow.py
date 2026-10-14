@@ -239,6 +239,13 @@ class MainWindow(QMainWindow):
         self._act(m, "Apple Music에 반영 (새로 읽기)", self.music_refresh, "Ctrl+Shift+M")
         self._act(m, "저장한 뒤 자동으로 Music에 반영", lambda on: self.settings.setValue("music_auto", on),
                   checkable=True, checked=self.settings.value("music_auto", False, bool))
+        sub = m.addMenu("반영 속도")
+        grp = QActionGroup(self)
+        cur = self.settings.value("music_pace", music.DEFAULT_PACE, str)
+        for key, label in music.PACE_LABELS.items():
+            a = self._act(sub, label, lambda on, key=key: on and self.settings.setValue("music_pace", key),
+                          checkable=True, checked=key == cur)
+            grp.addAction(a)
         m.addSeparator()
         self._act(m, "Music에서 선택한 곡 추가", self.music_add_selection, "Ctrl+Shift+I")
         m.addSeparator()
@@ -804,6 +811,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Music 작업이 이미 진행 중입니다.", 4000)
             return
         self._music_busy = True
+        pace = self.settings.value("music_pace", music.DEFAULT_PACE, str)
         # Music에 보여야 할 값 (제목·앨범) — 반영됐는지 확인하는 데 쓴다
         by_path = {f.path: f for f in self.model.files}
         expected = {p: (by_path[p].get("title").split("\\\\")[0], by_path[p].get("album").split("\\\\")[0])
@@ -868,7 +876,7 @@ class MainWindow(QMainWindow):
                 if p in moved:
                     inode[os.path.realpath(moved[p])] = inode.get(os.path.realpath(p), (0, 0))
             exp = {moved.get(p, p): v for p, v in expected.items()}
-            res = music.refresh(now, prog, cancelled, exp, relocate=relocate)
+            res = music.refresh(now, prog, cancelled, exp, relocate=relocate, pace=pace)
             # music.refresh 의 키는 '반영 시작 때 경로'이므로 목록의 원래 경로로 되돌린다
             orig = {os.path.realpath(moved.get(p, p)): os.path.realpath(p) for p in paths}
             final = {}
