@@ -182,7 +182,7 @@ class MainWindow(QMainWindow):
     def _preload(self):
         """창이 뜬 직후 나머지 창 모듈을 미리 불러 둔다. 앱이 켜져 있는 동안 앱 파일이 새 버전으로
         바뀌어도(새로 빌드) 나중에 창을 열 때 다른 버전의 모듈을 읽지 않게 한다."""
-        from . import artworkdialog, backupdialog, export, exttags  # noqa: F401
+        from . import artworkdialog, backupdialog, export, extractdialog, exttags  # noqa: F401
 
     def _prune_backups(self):
         try:
@@ -258,6 +258,8 @@ class MainWindow(QMainWindow):
         m = mb.addMenu("커버")
         self._act(m, "앨범아트 찾기 · 가져오기…", self.find_artwork, "Ctrl+Shift+A")
         self._act(m, "커버 크기 조정…", self.resize_covers, "Ctrl+Shift+K")
+        m.addSeparator()
+        self._act(m, "앨범아트 추출 (링크 · 보관함 · 목록 · YouTube)…", self.extract_artwork, "Ctrl+Shift+X")
 
         m = mb.addMenu("Music")
         self._act(m, "Apple Music에 반영 (새로 읽기)", self.music_refresh, "Ctrl+Shift+M")
@@ -1138,6 +1140,18 @@ class MainWindow(QMainWindow):
                     pics.insert(0, pic)
                 plans.append(Plan(f, pictures=pics))
             self.apply_plans(plans, "커버 바꾸기")
+
+    def extract_artwork(self):
+        """앨범아트를 이미지 파일로 저장하는 창 (앨범아트 추출기). 창은 하나만 열어 둔다."""
+        from .extractdialog import ExtractDialog
+        dlg = getattr(self, "_extract_dlg", None)
+        if dlg is None:
+            dlg = self._extract_dlg = ExtractDialog(self)
+        elif dlg.tabs.currentIndex() == 2 and not dlg.job:
+            dlg.load_files()
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
 
     def resize_covers(self):
         files = self._files_for_command()

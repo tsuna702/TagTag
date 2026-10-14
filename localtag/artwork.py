@@ -171,13 +171,15 @@ class _HttpsOnly(request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-def fetch(url: str, limit: int) -> bytes:
+def fetch(url: str, limit: int, headers: dict | None = None, data: bytes | None = None) -> bytes:
+    """https 주소에서 limit 바이트까지 받는다. data 를 주면 POST."""
     parts = parse.urlsplit(url)
     if parts.scheme != "https" or parts.username or parts.password:
         raise ArtworkError("https 주소만 쓸 수 있습니다.")
     opener = request.build_opener(_HttpsOnly(), request.HTTPSHandler(context=_ssl_context()))
+    req = request.Request(url, data=data, headers={"User-Agent": USER_AGENT, **(headers or {})})
     try:
-        with opener.open(request.Request(url, headers={"User-Agent": USER_AGENT}), timeout=15) as resp:
+        with opener.open(req, timeout=15) as resp:
             chunks, count, started = [], 0, time.monotonic()
             while True:
                 data = resp.read(min(65536, limit + 1 - count))

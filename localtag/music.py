@@ -230,6 +230,22 @@ def _osascript(script, *args, timeout=60):
     return r.stdout
 
 
+def _osascript_js(script, timeout=120):
+    """JavaScript for Automation 으로 실행 (곡 정보를 한꺼번에 JSON 으로 받을 때)."""
+    try:
+        r = subprocess.run(["/usr/bin/osascript", "-l", "JavaScript", "-e", script],
+                           capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as e:
+        raise MusicError("Music이 응답하지 않습니다. 보관함이 크면 시간이 걸릴 수 있습니다. 다시 시도해 주세요.") from e
+    if r.returncode:
+        if "-1743" in r.stderr:
+            raise MusicError(PERMISSION_HELP)
+        if "-600" in r.stderr:
+            raise MusicError("Apple Music을 먼저 열어 주세요.")
+        raise MusicError("Music 작업에 실패했습니다.\n" + r.stderr.strip())
+    return r.stdout
+
+
 def ensure_access(launch=False):
     """Music을 쓸 수 있는지 확인한다. 아직 묻지 않은 'Apple Music 보관함 접근' 권한은 먼저 받는다."""
     if media_library_status() == "ask":
