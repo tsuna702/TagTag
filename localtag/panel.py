@@ -18,6 +18,40 @@ THUMB_CACHE = 16
 KEEP = "< 유지 >"
 BLANK = "< 비우기 >"
 COVER_SIZE = 220
+# 트랙·디스크는 '번호 / 총수' 두 칸으로 나눠 편집한다 (여러 곡을 골라도 총수만, 또는 번호만 바꿀 수 있게)
+PAIRS = {"track": "_track_total", "disc": "_disc_total"}
+TOTAL_OF = {v: k for k, v in PAIRS.items()}
+
+
+def split_pair(value: str) -> tuple[str, str]:
+    """'3/12' → ('3', '12'), '3' → ('3', '')"""
+    num, _, total = value.split(SEP)[0].partition("/")
+    return num.strip(), total.strip()
+
+
+class PairEdit(tuple):
+    """번호·총수 편집: (번호, 총수). None 은 곡마다 그대로 둔다, '' 는 지운다."""
+
+    def apply(self, current: str) -> list[str]:
+        cur_num, cur_total = split_pair(current)
+        num = cur_num if self[0] is None else self[0]
+        total = cur_total if self[1] is None else self[1]
+        if not num and not total:
+            return []
+        return [num + (f"/{total}" if total else "")]
+
+
+def changes_for(changes: dict, f) -> dict:
+    """collect() 결과를 파일 하나에 맞춘 실제 변경으로 (번호·총수는 곡마다 따로 계산)."""
+    out = {}
+    for name, vals in changes.items():
+        if isinstance(vals, PairEdit):
+            new = vals.apply(f.get(name))
+            if new != f.tags.get(name, []):
+                out[name] = new
+        else:
+            out[name] = vals
+    return out
 
 
 def image_bytes_from_qimage(img: QImage) -> tuple[bytes, str]:
@@ -85,17 +119,28 @@ class TagPanel(QWidget):
         form.setLabelAlignment(Qt.AlignRight)
 
         self.combos: dict[str, QComboBox] = {}
-        for name in FIELDS + ["_filename"]:
+        for name in FIELDS + list(PAIRS.values()) + ["_filename"]:
             cb = QComboBox()
             cb.setEditable(True)
             cb.setInsertPolicy(QComboBox.NoInsert)
             cb.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            cb.setMinimumContentsLength(12)
+            cb.setMinimumContentsLength(4 if name in PAIRS or name in TOTAL_OF else 12)
             cb.lineEdit().returnPressed.connect(self.saveRequested)
             cb.editTextChanged.connect(lambda _: self.changed.emit())
             self.combos[name] = cb
         for name in FIELDS:
-            form.addRow(FIELD_LABELS[name] + ":", self.combos[name])
+            if name in PAIRS:
+                total = self.combos[PAIRS[name]]
+                self.combos[name].setToolTip("번호 — 여러 곡을 골랐을 때 < 유지 > 로 두면 곡마다 그대로")
+                total.setToolTip("총수 — 여러 곡에 한꺼번에 넣어도 곡마다 번호는 그대로")
+                row = QHBoxLayout()
+                row.setSpacing(4)
+                row.addWidget(self.combos[name], 1)
+                row.addWidget(QLabel("/"))
+                row.addWidget(total, 1)
+                form.addRow(FIELD_LABELS[name] + ":", row)
+            else:
+                form.addRow(FIELD_LABELS[name] + ":", self.combos[name])
         form.addRow("파일명:", self.combos["_filename"])
         layout.addLayout(form)
 
@@ -137,6 +182,10 @@ class TagPanel(QWidget):
         for name, cb in self.combos.items():
             if name == "_filename":
                 values = [f.stem for f in self.files]
+            elif name in PAIRS:
+                values = [split_pair(f.get(name))[0] for f in self.files]
+            elif name in TOTAL_OF:
+                values = [split_pair(f.get(TOTAL_OF[name]))[1] for f in self.files]
             else:
                 values = [f.get(name) for f in self.files]
             distinct = list(dict.fromkeys(values))
@@ -324,7 +373,21 @@ class TagPanel(QWidget):
     def collect(self):
         """(태그 변경 dict, 커버 작업, 새 파일명 또는 None)"""
         changes = {}
+        for name, total_name in PAIRS.items():
+            edit = []
+            for key in (name, total_name):
+                text = self.combos[key].currentText()
+                if text == self.initial.get(key) or text == KEEP:
+                    edit.append(None)
+                elif text == BLANK:
+                    edit.append("")
+                else:
+                    edit.append(text.strip())
+            if edit != [None, None]:
+                changes[name] = PairEdit(edit)
         for name in FIELDS:
+            if name in PAIRS:
+                continue
             text = self.combos[name].currentText()
             if text == self.initial.get(name) or text == KEEP:
                 continue

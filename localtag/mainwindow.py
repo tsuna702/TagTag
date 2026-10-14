@@ -22,7 +22,7 @@ from .converters import CONVERTERS, AutoNumber
 from .filetrack import find_moved
 from .filterexpr import FilterError, compile_filter
 from .model import COLUMN_WIDTHS, COLUMNS, FileModel, SortProxy, fmt_length, fmt_size
-from .panel import TagPanel
+from .panel import TagPanel, changes_for
 from .plan import Plan, UndoEntry, UndoItem
 from .tagio import (
     AUDIO_EXTS, AudioFile, Options, move_file, restore_snapshot, scan,
@@ -653,7 +653,7 @@ class MainWindow(QMainWindow):
                         pics.insert(0, cover_op[1])
                 elif idx >= 0:
                     del pics[idx]
-            p = Plan(f, changes=dict(changes), pictures=pics)
+            p = Plan(f, changes=changes_for(changes, f), pictures=pics)
             if new_stem is not None:
                 try:
                     new_path = f.path_for_stem(new_stem)
