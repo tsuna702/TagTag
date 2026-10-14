@@ -61,21 +61,36 @@ end run
 '''
 
 # persistent ID 로 곡을 찾아 현재 Music에 보이는 정보를 읽거나(read), 다시 새로 읽게 한다(refresh).
+#   read:    인자 = read, <pid>, <pid>, …
+#   refresh: 인자 = refresh, <pid>, <제목>, <앨범>, <pid>, <제목>, <앨범>, …
 #   LOCALTAG_INFO:<pid>\t<제목>\t<앨범>\t<경로>
+# 새로 읽기는 한 곡씩 Music이 새 제목·앨범을 보여 줄 때까지(최소 0.8초, 최대 3초) 기다린 뒤 다음 곡으로 넘어간다.
+# 앨범 이름을 바꾸면 Music이 곡을 하나씩 새 앨범으로 옮기는데, 너무 빨리 몰아 보내면 앨범 화면이 따라오지 못해
+# Music을 다시 켤 때까지 앨범이 갈라져 보인다 (앨범태그는 곡마다 보관함 검색이 끼어 있어 저절로 약 0.8초 간격이었다).
 ID_SCRIPT = '''
 on run arguments
     set mode to item 1 of arguments
-    set ids to rest of arguments
+    set args to rest of arguments
+    set stepCount to 1
+    if mode is "refresh" then set stepCount to 3
     set i to 0
     tell application "Music"
-        repeat with pidRef in ids
-            set pid to contents of pidRef
+        repeat with k from 1 to (count of args) by stepCount
+            set pid to item k of args
             try
                 with timeout of 60 seconds
                     set t to first file track of library playlist 1 whose persistent ID is pid
                     if mode is "refresh" then
+                        set wantName to item (k + 1) of args
+                        set wantAlbum to item (k + 2) of args
                         refresh t
-                        delay 0.25
+                        repeat with tick from 1 to 15
+                            delay 0.2
+                            if tick >= 4 then
+                                if wantName is "" and wantAlbum is "" then exit repeat
+                                if (name of t as text) is wantName and (album of t as text) is wantAlbum then exit repeat
+                            end if
+                        end repeat
                     end if
                     set loc to ""
                     try
@@ -383,7 +398,14 @@ def refresh(paths, progress=lambda *_: None, cancelled=lambda: False, expected=N
             mode = "read" if rnd == 1 else "refresh"
             msg = "Music에 반영됐는지 확인하는 중" if rnd == 1 else f"아직 옛 정보인 곡 다시 반영 ({rnd - 1}/{rounds})"
         ids = list(dict.fromkeys(pending.values()))
-        lines = _run_script(ID_SCRIPT, [mode, *ids],
+        if mode == "refresh":
+            want = {}
+            for k, pid in pending.items():
+                want.setdefault(pid, expected.get(k) or ("", ""))
+            args = [x for pid in ids for x in (pid, *want[pid])]
+        else:
+            args = ids
+        lines = _run_script(ID_SCRIPT, [mode, *args],
                             lambda n, total=len(ids), msg=msg: progress(n, total, f"{msg} ({n}/{total})"), cancelled)
         if rnd == 0:
             continue  # 새로 읽기 직후 정보는 아직 옛것일 수 있으므로 확인은 다음 단계에서
