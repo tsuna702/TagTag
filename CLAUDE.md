@@ -1,0 +1,63 @@
+# LocalTag — 작업 지침
+
+Mp3tag 를 본뜬 음악 태그 편집기. Python 3 + PySide6(Qt) + mutagen. GitHub `tsuna702/TagTag` (공개 저장소).
+사용자와는 **한국어**로 이야기하고, 앱 화면의 글도 모두 한국어로 쓴다. 기능 설명은 README.md 에 있다.
+
+## 브랜치
+
+- `main` — macOS 판. 릴리스는 여기서 나간다.
+- `windows` — Windows 판 작업 (Windows PC 에서). 계획과 체크리스트: **[docs/WINDOWS.md](docs/WINDOWS.md)**.
+  macOS 판이 계속 그대로 돌아가야 한다. 맥 전용 부분은 지우지 말고 운영체제에 따라 갈라 둔다.
+  `main` 에 새 커밋이 생기면 `windows` 로 merge 해서 따라간다.
+
+## 늘 지키는 규칙
+
+1. **고치면 릴리스까지 (묻지 않음).** 앱을 고치면 버전을 올리고, 한국어 제목으로 커밋하고, 릴리스한다.
+   - 버전: `packaging/LocalTag.spec` 의 `CFBundleShortVersionString`·`CFBundleVersion` (작은 수정은 패치 버전 +1).
+   - 릴리스 노트는 지난 태그 이후 **커밋 제목**으로 자동으로 만든다 → 제목을 사용자가 읽을 수 있게 쓴다
+     (예: `태그 비교(⇧⌘D) 추가 — 고른 곡을 나란히 놓고 다른 줄을 노란색으로 (0.8.0)`).
+   - macOS: `./release.sh` (빌드 → zip → `gh release create`). 커밋 안 한 변경이 있거나 같은 태그가 있으면 멈춘다.
+   - Windows: 릴리스 방식은 docs/WINDOWS.md 의 "릴리스" 를 따른다 (아직 만드는 중).
+   - 커밋 끝에 `Co-Authored-By:` 줄을 붙인다.
+2. **테스트는 사용자의 실제 환경을 건드리지 않는다.** `tests/harness.py` 를 쓴다.
+   - 설정은 임시 INI 로 바꿔 끼운다. 실제 설정(macOS plist, Windows 레지스트리 `HKCU\Software\LocalTag`)에 `clear()` 금지.
+   - 앱 데이터(백업 등)는 `QStandardPaths.writableLocation` 을 실행 폴더로 돌린다.
+     `setTestModeEnabled` 만 쓰면 `~/.qttest` 같은 곳에 쌓인다 — 예전에 5GB까지 커져 사용자가 지적했다.
+   - Apple Music 자동 반영을 켠 채로 저장하지 않는다 (harness 가 확인한다). 실제 Music 보관함은 읽기만.
+   - 테스트를 돌리면 **이번 실행 폴더만 남기고 이전 테스트 파일은 지운다** (harness 가 `tests/runs/` 에서 자동으로).
+   - 샘플은 저장소 `samples/` 를 실행 폴더로 복사해서 쓴다. 원본 샘플을 고치지 않는다.
+   - 실행: `python tests/smoke.py` (Windows: `.venv\Scripts\python tests\smoke.py`). 새 기능에는 테스트를 더한다.
+3. **서명 인증서를 만들자고 제안하지 않는다.** macOS 는 PyInstaller 임시(ad-hoc) 서명 그대로 — 사용자가 거절했다.
+   Windows 도 서명하지 않은 `.exe` 로 시작한다 (SmartScreen 경고는 감수). 유료 인증서는 사용자가 먼저 말할 때만.
+4. **Apple Music 반영을 다시 빠르게 만들지 않는다.** 곡을 빨리 몰아 refresh 하면 Music 앨범 화면에서 곡이
+   갈라져 보인다(데이터는 맞음, Music 을 다시 켜야 합쳐짐). 지금은 곡마다 새 정보·파일 위치가 안정되고 최소
+   대기(반영 속도, 기본 "천천히" 3초)를 지난 뒤 다음 곡으로 간다. 사용자가 천천히에서 문제없음을 확인했다.
+5. 토큰·비밀번호를 대신 입력하지 않는다. `gh` 로그인 같은 것은 사용자가 직접 한다.
+
+## 코드 습관
+
+- 주석·docstring·UI 문구는 한국어, 짧게. 주변 코드의 말투와 밀도에 맞춘다.
+- 태그 쓰기는 **안전 저장**(`safewrite.safe_modify`): 사본에 쓰고 오디오 데이터가 바이트 단위로 같은지 확인한 뒤
+  원본에는 달라진 부분만 다시 쓴다 (파일 번호가 그대로라 Music 이 곡을 놓치지 않는다). 이 흐름을 우회하지 않는다.
+- 파일을 바꾸는 작업은 `Plan` 목록을 만들어 `MainWindow.apply_plans` 로 적용한다 → 백업·실행 취소·Music 반영이 따라온다.
+- 열 추가는 `model.COLUMNS` **끝에** 붙인다 (저장해 둔 열 배치가 어긋나지 않게).
+- 무거운 창 모듈은 함수 안에서 import 하고 `MainWindow._preload` 목록에도 넣는다.
+
+## 파일 지도 (localtag/)
+
+| 파일 | 하는 일 |
+|---|---|
+| `tagio.py` | 파일 읽기·쓰기(mutagen), `AudioFile`, 커버, 스냅샷(실행 취소) |
+| `safewrite.py` | 안전 저장, 복사(macOS `copyfile` clone) |
+| `model.py` | 목록 표 모델·열·정렬 |
+| `mainwindow.py` | 메인 창, 메뉴, `apply_plans`, 실행 취소 |
+| `panel.py` | 왼쪽 태그 패널 |
+| `script.py` / `filterexpr.py` | 포맷 문자열 / 필터 |
+| `converters.py` | 변환기(태그↔파일명 등), 자동 번호 매기기 |
+| `actions.py` / `actiondialogs.py` | 액션·액션 그룹 |
+| `rename.py` / `renamedialog.py` | 곡명·파일명 일괄 변경 |
+| `ytclean.py` / `ytdialog.py` | YouTube 제목 정리 |
+| `dupes.py` / `compare.py` | 같은 곡 찾기 / 태그 비교 |
+| `artwork*.py`, `covermatch.py`, `extract*.py` | 앨범아트 찾기·짝짓기·추출 |
+| `backup*.py` | 원본 백업 |
+| `music.py`, `filetrack.py` | **macOS 전용** Apple Music 연동, 옮겨진 파일 찾기 |

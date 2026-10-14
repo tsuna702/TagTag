@@ -8,6 +8,10 @@ VERSION=$(grep -o '"CFBundleShortVersionString": "[^"]*"' packaging/LocalTag.spe
 TAG="v$VERSION"
 REPO="tsuna702/TagTag"
 
+if [ "$(git branch --show-current)" != "main" ]; then
+  echo "macOS 릴리스는 main 브랜치에서만 합니다 (지금: $(git branch --show-current))." >&2
+  exit 1
+fi
 if ! git diff --quiet || ! git diff --cached --quiet; then
   echo "커밋하지 않은 변경이 있습니다. 먼저 커밋해 주세요." >&2
   exit 1
