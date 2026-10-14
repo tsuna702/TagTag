@@ -46,7 +46,7 @@ $install = @(
 $notes = New-TemporaryFile
 if ($exists) {
     # macOS 릴리스 노트는 그대로 두고, 그 태그 이후 windows 브랜치에만 있는 커밋과 설치 안내를 더한다
-    $body = gh release view $Tag --repo $Repo --json body -q ".body"
+    $body = (gh release view $Tag --repo $Repo --json body -q ".body") -join "`n"  # 여러 줄이 배열로 오므로 다시 잇는다
     $winLog = git log "$Tag..HEAD" --no-merges --pretty="- %s"
     $lines = @($body, "", "### Windows 판")
     if ($winLog) { $lines += $winLog }
@@ -56,7 +56,7 @@ if ($exists) {
     $log = if ($prev) { git log "$prev..HEAD" --no-merges --pretty="- %s" } else { git log --no-merges --pretty="- %s" }
     $lines = @("## LocalTag $Version", "", "### 바뀐 점") + $log + @("") + $install
 }
-[IO.File]::WriteAllLines($notes, [string[]]$lines, (New-Object Text.UTF8Encoding $false))
+[IO.File]::WriteAllLines($notes, [string[]]@($lines | ForEach-Object { $_ }), (New-Object Text.UTF8Encoding $false))
 
 Invoke-Git push -q origin windows
 if ($exists) {
