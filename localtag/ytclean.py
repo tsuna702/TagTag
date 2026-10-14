@@ -95,11 +95,54 @@ def split_title(s: str, order: str = "artist_title"):
 _EDGE = r"(?:[【\[(（〔][^】\])）〕]*[】\])）〕]\s*)+"
 
 
+def compile_rx(pattern: str, what: str):
+    """사용자가 넣은 정규식. (?<이름>…) 도 받는다 (파이썬은 (?P<이름>…)). 틀리면 ValueError."""
+    if not pattern.strip():
+        return None
+    py = re.sub(r"\(\?<(?![=!])(\w+)>", r"(?P<\1>", pattern)
+    try:
+        return re.compile(py, re.IGNORECASE)
+    except re.error as e:
+        raise ValueError(f"{what} 정규식 오류: {e}") from e
+
+
+def _tidy(s: str) -> str:
+    return re.sub(r"\s{2,}", " ", s).strip(" -–—|/·")
+
+
+def regex_split(rx, s: str, order: str = "artist_title"):
+    """나누기 정규식: (?P<artist>…) (?P<title>…) 이름 그룹, 없으면 1·2번 그룹을 '제목 모양' 순서로.
+    맞지 않으면 None."""
+    m = rx.search(s)
+    if not m:
+        return None
+    g = m.groupdict()
+    if "artist" in g or "title" in g:
+        a, t = g.get("artist") or "", g.get("title") or ""
+    elif len(m.groups()) >= 2:
+        a, t = m.group(1) or "", m.group(2) or ""
+        if order == "title_artist":
+            a, t = t, a
+    else:
+        return None
+    return a.strip(), t.strip()
+
+
 def clean(title: str, artist: str = "", split: bool = True, keep_cover: bool = True,
-          overwrite_artist: bool = True, order: str = "artist_title"):
-    """(새 제목, 새 아티스트). 제목에서 아티스트를 찾지 못하면 원래 아티스트(채널 이름 정리)."""
+          overwrite_artist: bool = True, order: str = "artist_title", remove_rx=None, split_rx=None):
+    """(새 제목, 새 아티스트). 제목에서 아티스트를 찾지 못하면 원래 아티스트(채널 이름 정리).
+    remove_rx: 더 지울 말 (컴파일한 정규식), split_rx: 아티스트·제목 나누기 정규식 (맞으면 기본 규칙보다 먼저)."""
     t = strip_noise(title, keep_cover)
+    if remove_rx is not None:
+        t = _tidy(remove_rx.sub(" ", t))
     art = clean_channel(artist) if artist else ""
+    if split and split_rx is not None:
+        r = regex_split(split_rx, t, order)
+        if r:
+            a, rest = r
+            rest = strip_noise(rest, keep_cover)
+            if rest and (not a or not artist or overwrite_artist or _same(a, art) or _looks_channel(artist)):
+                return rest, (strip_noise(a, keep_cover) if a else art)
     if split:
         head = re.match(r"^\s*" + _EDGE, t)
         pre = head.group(0).strip() if head else ""

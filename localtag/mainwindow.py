@@ -209,7 +209,7 @@ class MainWindow(QMainWindow):
     def _preload(self):
         """창이 뜬 직후 나머지 창 모듈을 미리 불러 둔다. 앱이 켜져 있는 동안 앱 파일이 새 버전으로
         바뀌어도(새로 빌드) 나중에 창을 열 때 다른 버전의 모듈을 읽지 않게 한다."""
-        from . import artworkdialog, backupdialog, compare, covermatch, dupes, export, extractdialog, exttags, ytclean  # noqa: F401
+        from . import artworkdialog, backupdialog, compare, covermatch, dupes, export, extractdialog, exttags, ytclean, ytdialog  # noqa: F401
 
     def _prune_backups(self):
         try:
@@ -922,8 +922,17 @@ class MainWindow(QMainWindow):
             self._run_actions_with_preview(describe(a), [a], files)
 
     def youtube_clean(self):
-        """YouTube에서 받은 곡의 제목에서 꼬리말을 떼고 '아티스트 - 제목'을 나눈다 (미리 보기 후 적용)."""
-        self.quick_action("youtube")
+        """YouTube에서 받은 곡의 제목에서 꼬리말을 떼고 '아티스트 - 제목'을 나눈다.
+        고른 곡, 고른 곡이 없으면 목록에 보이는 곡 전체를 한 번에 (미리 보고 적용)."""
+        self._confirm_pending()
+        files = self.selected_files() or self.visible_files()
+        if not files:
+            QMessageBox.information(self, APP_NAME, "정리할 곡을 목록에 먼저 불러오세요.")
+            return
+        from .ytdialog import YtCleanDialog
+        dlg = YtCleanDialog(self, files, self.settings)
+        if dlg.exec():
+            self.apply_plans(dlg.result_plans(), "YouTube 제목 정리")
 
     def compare_tags(self):
         files = self.selected_files()

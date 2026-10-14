@@ -63,7 +63,9 @@ FORMS = {
     "youtube": [("split", "제목에서 아티스트를 떼어 아티스트 칸으로", "bool"),
                 ("order", "제목 모양", "choice_order"),
                 ("overwrite_artist", "이미 있는 아티스트(채널 이름 등)도 바꾸기", "bool"),
-                ("keep_cover", "'歌ってみた'·'Cover' 같은 커버곡 표시는 남기기", "bool")],
+                ("keep_cover", "'歌ってみた'·'Cover' 같은 커버곡 표시는 남기기", "bool"),
+                ("remove_regex", "더 지울 말 (정규식, 여러 개는 | 로)", "text"),
+                ("split_regex", "나누기 정규식 ((?<artist>…) (?<title>…))", "text")],
 }
 
 

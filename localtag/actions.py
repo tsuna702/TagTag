@@ -61,7 +61,8 @@ DEFAULTS = {
     "export_cover": {"filename": "cover", "overwrite": False},
     "remove_cover": {},
     "resize_cover": {"size": 500, "fit": "crop", "trim": False},
-    "youtube": {"split": True, "order": "artist_title", "keep_cover": True, "overwrite_artist": True},
+    "youtube": {"split": True, "order": "artist_title", "keep_cover": True, "overwrite_artist": True,
+                "remove_regex": "", "split_regex": ""},
 }
 
 
@@ -99,6 +100,10 @@ def describe(a: dict) -> str:
         opts = [f"'{YT_ORDERS.get(a.get('order'), '')}' 나누기"] if a.get("split", True) else []
         if not a.get("keep_cover", True):
             opts.append("커버 표시도 지움")
+        if a.get("remove_regex"):
+            opts.append(f"지울 말 /{a['remove_regex']}/")
+        if a.get("split_regex"):
+            opts.append(f"나누기 /{a['split_regex']}/")
         return f"{name}" + (": " + ", ".join(opts) if opts else "")
     if t == "resize_cover":
         from .artwork import FITS
@@ -251,13 +256,15 @@ def apply_action(w: Work, a: dict, index: int, total: int):
         if w.pictures:
             w.pictures, w.pics_changed = [], True
     elif t == "youtube":
-        from .ytclean import clean
+        from .ytclean import clean, compile_rx
         # 제목이 없으면 파일명에서 (JDownloader로 받은 파일은 태그가 비어 있기도 하다)
         src = w.view().get("title") or w.view().stem
         title, artist = clean(src, w.view().get("artist"), split=a.get("split", True),
                               keep_cover=a.get("keep_cover", True),
                               overwrite_artist=a.get("overwrite_artist", True),
-                              order=a.get("order", "artist_title"))
+                              order=a.get("order", "artist_title"),
+                              remove_rx=compile_rx(a.get("remove_regex", ""), "더 지울 말"),
+                              split_rx=compile_rx(a.get("split_regex", ""), "나누기"))
         if title:
             w.tags["title"] = [title]
         if artist:
