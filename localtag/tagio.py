@@ -10,7 +10,9 @@ import copy
 import os
 import shutil
 import struct
+import threading
 import unicodedata
+import weakref
 from dataclasses import dataclass, field
 
 import mutagen
@@ -113,6 +115,48 @@ class Picture:
     desc: str = ""
 
 
+# 같은 앨범의 곡들은 보통 같은 커버를 갖고 있다. 내용이 같은 이미지는 메모리에 한 번만 두고 함께 쓴다
+# (곡마다 1MB 커버를 따로 들고 있으면 수천 곡을 열 때 수 GB가 된다). bytes 는 바뀌지 않으므로 함께 써도 안전하다.
+_shared_lock = threading.Lock()
+_shared: dict[tuple, list] = {}
+_dead: list = []  # 사라진 커버의 키 (weakref 콜백은 아무 스레드에서나 불리므로 여기 모아 두고 나중에 정리)
+
+
+def _picture(data: bytes, mime: str, ptype: int, desc: str) -> Picture:
+    data = bytes(data)
+    if len(data) < 1024:
+        return Picture(data, mime, ptype, desc)
+    key = (len(data), data[:64], data[-64:])
+    with _shared_lock:
+        while _dead:
+            k = _dead.pop()
+            refs = _shared.get(k)
+            if refs is not None:
+                refs[:] = [r for r in refs if r() is not None]
+                if not refs:
+                    del _shared[k]
+        refs = _shared.setdefault(key, [])
+        for r in refs:
+            other = r()
+            if other is not None and (other.data is data or other.data == data):
+                return Picture(other.data, mime, ptype, desc)
+        pic = Picture(data, mime, ptype, desc)
+        refs.append(weakref.ref(pic, lambda _r, key=key: _dead.append(key)))
+        return pic
+
+
+def _share(data: bytes) -> bytes:
+    """메모리에 이미 같은 이미지가 있으면 그 bytes 를 돌려준다 (실행 취소 스냅샷의 커버용)."""
+    if len(data) < 1024:
+        return data
+    with _shared_lock:
+        for r in _shared.get((len(data), data[:64], data[-64:]), ()):
+            other = r()
+            if other is not None and (other.data is data or other.data == data):
+                return other.data
+    return data
+
+
 def guess_mime(data: bytes) -> str:
     if data[:3] == b"\xff\xd8\xff":
         return "image/jpeg"
@@ -207,7 +251,7 @@ def _id3_read(tags: ID3, opts: Options):
             continue
         if hasattr(frame, "text") and name not in out:
             out[name] = _id3_text(frame, opts)
-    pics = [Picture(f.data, f.mime or guess_mime(f.data), int(f.type), f.desc)
+    pics = [_picture(f.data, f.mime or guess_mime(f.data), int(f.type), f.desc)
             for f in tags.getall("APIC")]
     return out, pics
 
@@ -334,7 +378,7 @@ def _ogg_read_pics(tags):
             fp = FlacPicture(base64.b64decode(b64))
         except Exception:
             continue
-        pics.append(Picture(fp.data, fp.mime or guess_mime(fp.data), int(fp.type), fp.desc))
+        pics.append(_picture(fp.data, fp.mime or guess_mime(fp.data), int(fp.type), fp.desc))
     return pics
 
 
@@ -415,7 +459,7 @@ def _mp4_read(tags):
     pics = []
     for c in tags.get("covr", []):
         mime = "image/png" if c.imageformat == MP4Cover.FORMAT_PNG else guess_mime(bytes(c))
-        pics.append(Picture(bytes(c), mime, 3, ""))
+        pics.append(_picture(c, mime, 3, ""))
     return out, pics
 
 
@@ -496,7 +540,7 @@ def _ape_read(tags):
             raw = bytes(value.value)
             _, _, data = raw.partition(b"\x00")
             ptype = 4 if "back" in key.lower() else 3 if "front" in key.lower() else 0
-            pics.append(Picture(data, guess_mime(data), ptype, ""))
+            pics.append(_picture(data, guess_mime(data), ptype, ""))
     return out, pics
 
 
@@ -553,7 +597,7 @@ def _asf_parse_pic(b: bytes):
     mime = read_wstr()
     desc = read_wstr()
     data = b[pos:]
-    return Picture(data, mime or guess_mime(data), ptype, desc)
+    return _picture(data, mime or guess_mime(data), ptype, desc)
 
 
 def _asf_pack_pic(p: Picture) -> bytes:
@@ -630,6 +674,10 @@ def _kind(mf) -> str:
 
 class UnsupportedFile(Exception):
     pass
+
+
+def _info_length(mf) -> float | None:
+    return None if mf is None else float(getattr(mf.info, "length", 0) or 0)
 
 
 @dataclass(eq=False)
@@ -721,7 +769,7 @@ class AudioFile:
             if tags is not None:
                 af.tags = _vorbis_read(tags)
                 af.tag_type = "FLAC"
-            af.pictures = [Picture(p.data, p.mime or guess_mime(p.data), int(p.type), p.desc)
+            af.pictures = [_picture(p.data, p.mime or guess_mime(p.data), int(p.type), p.desc)
                            for p in mf.pictures]
         elif kind == "ogg":
             if tags is not None:
@@ -741,11 +789,26 @@ class AudioFile:
         return af
 
     # ---- 쓰기
-    def save(self, changes: dict, pictures: list | None, opts: Options) -> "AudioFile":
-        """changes: {필드: [값...]} (빈 리스트는 삭제). pictures: None이면 커버 변경 없음."""
+    def _snapshot_hook(self, snapshot):
+        """snapshot 목록이 주어지면, 바꾸기 직전 상태를 같은 파일 읽기로 함께 담는 함수를 돌려준다."""
+        if snapshot is None:
+            return lambda mf, path: None
+        orig = self.path
+
+        def hook(mf, path):
+            st = os.stat(orig)  # 시각은 작업 사본이 아니라 원본의 것 (아직 바뀌기 전)
+            snapshot.append(_snapshot_of(mf, path, (st.st_atime, st.st_mtime)))
+        return hook
+
+    def save(self, changes: dict, pictures: list | None, opts: Options, snapshot: list | None = None) -> "AudioFile":
+        """changes: {필드: [값...]} (빈 리스트는 삭제). pictures: None이면 커버 변경 없음.
+        snapshot 에 목록을 주면 바꾸기 전 태그(실행 취소용)를 담아 준다."""
+        hook = self._snapshot_hook(snapshot)
 
         def write(path):
             mf = mutagen.File(path)
+            hook(mf, path)
+            before = _info_length(mf)
             kind = _kind(mf)
             if mf.tags is None:
                 mf.add_tags()
@@ -782,13 +845,21 @@ class AudioFile:
                 mf.save()
             else:
                 raise UnsupportedFile("쓰기를 지원하지 않는 형식")
+            return before
 
-        safe_modify(self.path, write, opts.safe_save, opts.keep_mtime)
-        return AudioFile.load(self.path, opts)
+        return self._saved(safe_modify(self.path, write, opts.safe_save, opts.keep_mtime,
+                                       inspect=lambda p: AudioFile.load(p, opts)), opts)
 
-    def remove_tags(self, opts: Options) -> "AudioFile":
+    def _saved(self, af, opts: Options) -> "AudioFile":
+        return _adopt(af, self.path, opts)
+
+    def remove_tags(self, opts: Options, snapshot: list | None = None) -> "AudioFile":
+        hook = self._snapshot_hook(snapshot)
+
         def write(path):
             mf = mutagen.File(path)
+            hook(mf, path)
+            before = _info_length(mf)
             kind = _kind(mf)
             if kind == "id3" and isinstance(mf, (MP3, TrueAudio)):
                 from mutagen.id3 import delete as id3_delete
@@ -803,9 +874,10 @@ class AudioFile:
                 except Exception:
                     mf.tags.clear()
                     mf.save()
+            return before
 
-        safe_modify(self.path, write, opts.safe_save, opts.keep_mtime)
-        return AudioFile.load(self.path, opts)
+        return self._saved(safe_modify(self.path, write, opts.safe_save, opts.keep_mtime,
+                                       inspect=lambda p: AudioFile.load(p, opts)), opts)
 
     def path_for_stem(self, new_stem: str) -> str:
         """같은 폴더에서 확장자는 그대로 두고 이름만 바꾼 경로."""
@@ -870,51 +942,83 @@ class Snapshot:
     atime: float
     mtime: float
 
-    def size_estimate(self) -> int:
-        def walk(o):
-            if isinstance(o, (bytes, bytearray)):
-                return len(o)
-            if isinstance(o, str):
-                return len(o)
-            return 64
+    def size_estimate(self, seen: set | None = None) -> int:
+        """대략의 메모리 크기. seen 을 주면 여러 스냅샷이 함께 쓰는 커버는 한 번만 센다."""
         try:
             if self.kind == "id3" and self.data is not None:
-                return sum(len(getattr(f, "data", b"")) + 64 for f in self.data.values())
+                frames = list(self.data.values())
+                return 64 * len(frames) + _blob_size([getattr(f, "data", b"") for f in frames], seen)
             if self.kind == "flac" and self.data is not None:
-                return sum(len(p.data) for p in self.data[1]) + 1024
+                return 1024 + _blob_size([p.data for p in self.data[1]], seen)
         except Exception:
             pass
         return 4096
 
 
+def _blob_size(blobs, seen):
+    total = 0
+    for b in blobs:
+        if not isinstance(b, (bytes, bytearray)):
+            continue
+        if seen is not None:
+            if id(b) in seen:
+                continue
+            seen.add(id(b))
+        total += len(b)
+    return total
+
+
 def take_snapshot(path: str) -> Snapshot:
-    mf = mutagen.File(path)
-    kind = _kind(mf)
     st = os.stat(path)
+    return _snapshot_of(mutagen.File(path), path, (st.st_atime, st.st_mtime))
+
+
+def _snapshot_of(mf, path: str, times) -> Snapshot:
+    """이미 읽어 둔 mutagen 객체로 스냅샷을 만든다. times: 원본의 (atime, mtime)."""
+    kind = _kind(mf)
     tags = mf.tags
     had_v1 = False
     if kind == "id3":
         data = copy.deepcopy(tags)
         had_v1 = _has_id3v1(path)
+        if data is not None:
+            for frame in data.getall("APIC"):  # 같은 커버는 목록의 파일과 메모리를 함께 쓴다
+                frame.data = _share(frame.data)
     elif kind == "flac":
         data = (None if tags is None else copy.deepcopy(list(tags)),
                 copy.deepcopy(list(mf.pictures)))
+        for p in data[1]:
+            p.data = _share(p.data)
     elif kind in ("ogg", "asf"):
         data = None if tags is None else copy.deepcopy(list(tags))
     elif kind in ("mp4", "ape"):
         data = None if tags is None else {k: copy.deepcopy(v) for k, v in tags.items()}
     else:
         raise UnsupportedFile("스냅샷을 지원하지 않는 형식")
-    return Snapshot(kind, data, had_v1, st.st_atime, st.st_mtime)
+    return Snapshot(kind, data, had_v1, *times)
 
 
-def restore_snapshot(path: str, snap: Snapshot, safe: bool = True):
-    safe_modify(path, lambda p: _restore_into(p, snap), safe)
+def _adopt(af, path: str, opts: Options) -> AudioFile:
+    """저장 검증 때 작업 사본에서 읽은 정보를 원본의 경로·파일 정보로 고친다 (파일을 다시 읽지 않는다)."""
+    if af is None:
+        return AudioFile.load(path, opts)
+    st = os.stat(path)
+    af.path = path
+    af.size, af.mtime, af.dev, af.ino = st.st_size, st.st_mtime, st.st_dev, st.st_ino
+    return af
+
+
+def restore_snapshot(path: str, snap: Snapshot, safe: bool = True, opts: Options | None = None):
+    """스냅샷의 태그로 되돌린다. opts 를 주면 되돌린 파일을 읽은 AudioFile 을 돌려준다."""
+    af = safe_modify(path, lambda p: _restore_into(p, snap), safe,
+                     inspect=(lambda p: AudioFile.load(p, opts)) if opts else None)
     os.utime(path, (snap.atime, snap.mtime))
+    return _adopt(af, path, opts) if opts else None
 
 
 def _restore_into(path: str, snap: Snapshot):
     mf = mutagen.File(path)
+    before = _info_length(mf)
     kind = snap.kind
     if kind == "id3":
         tags = copy.deepcopy(snap.data)
@@ -963,3 +1067,4 @@ def _restore_into(path: str, snap: Snapshot):
             for k, v in snap.data.items():
                 mf.tags[k] = copy.deepcopy(v)
             mf.save()
+    return before

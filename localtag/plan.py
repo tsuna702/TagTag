@@ -60,5 +60,5 @@ class UndoEntry:
     label: str
     items: list = field(default_factory=list)
 
-    def size_estimate(self):
-        return sum(i.snapshot.size_estimate() for i in self.items if i.snapshot)
+    def size_estimate(self, seen: set | None = None):
+        return sum(i.snapshot.size_estimate(seen) for i in self.items if i.snapshot)

@@ -4,7 +4,11 @@
 앱을 다시 켜도 백업 관리자에서 되돌릴 수 있다.
 
   Backups/20261013-213000-ab12cd/journal.json
+  Backups/20261013-213000-ab12cd/journal.log   (작업 중에만: 파일마다 한 줄씩 덧붙이는 기록)
   Backups/20261013-213000-ab12cd/<uuid>.mp3
+
+작업 도중에는 journal.log 에 한 줄씩 덧붙이고(파일이 많아도 매번 전체를 다시 쓰지 않는다),
+작업이 끝나면 journal.json 하나로 합친다. 앱이 도중에 꺼지면 다음에 읽을 때 journal.log 를 합쳐 보여 준다.
 """
 from __future__ import annotations
 
@@ -17,6 +21,8 @@ from datetime import datetime
 
 from .safewrite import copy_preserving, SafeWriteError, write_back
 from .tagio import move_file
+
+LOG_NAME = "journal.log"
 
 
 def _identity(path):
@@ -33,13 +39,37 @@ def _write_json(path, value):
     os.replace(tmp, path)
 
 
+def _replay_log(folder, data):
+    """끝나지 않은 작업의 journal.log 를 journal.json 내용에 합친다."""
+    try:
+        with open(os.path.join(folder, LOG_NAME), encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return
+    entries = data.setdefault("entries", [])
+    for line in lines:
+        try:
+            rec = json.loads(line)
+            i, entry = rec["i"], rec["e"]
+        except (ValueError, KeyError, TypeError):
+            continue  # 꺼지는 순간 반쯤 쓰인 마지막 줄
+        while len(entries) <= i:
+            entries.append(None)
+        entries[i] = entry
+    data["entries"] = [e for e in entries if e is not None]
+
+
 def _dir_size(folder):
     total = 0
-    for name in os.listdir(folder):
-        try:
-            total += os.path.getsize(os.path.join(folder, name))
-        except OSError:
-            pass
+    try:
+        with os.scandir(folder) as it:
+            for e in it:
+                try:
+                    total += e.stat().st_size
+                except OSError:
+                    pass
+    except OSError:
+        pass
     return total
 
 
@@ -52,10 +82,18 @@ class BackupJob:
         self.journal_path = os.path.join(self.folder, "journal.json")
         self.data = {"id": self.id, "label": label, "created": time.strftime("%Y-%m-%d %H:%M:%S"),
                      "status": "running", "entries": []}
+        self._index = {}  # id(entry) → 번호
         self._save()
+        self._log = open(os.path.join(self.folder, LOG_NAME), "a", encoding="utf-8")
 
     def _save(self):
         _write_json(self.journal_path, self.data)
+
+    def _append(self, entry, sync):
+        self._log.write(json.dumps({"i": self._index[id(entry)], "e": entry}, ensure_ascii=False) + "\n")
+        self._log.flush()
+        if sync:
+            os.fsync(self._log.fileno())
 
     def before(self, path: str, copy_file: bool) -> dict:
         """파일을 바꾸기 직전에 부른다. copy_file이 False면 이름 바꾸기만 기록."""
@@ -70,22 +108,24 @@ class BackupJob:
                 raise SafeWriteError("백업 사본 확인에 실패했습니다. 파일을 바꾸지 않았습니다.")
             entry["backup"] = name
             entry["size"] = os.path.getsize(dest)
+        self._index[id(entry)] = len(self.data["entries"])
         self.data["entries"].append(entry)
-        self._save()
+        self._append(entry, sync=True)  # 원본을 바꾸기 전에 기록이 디스크에 남아 있어야 한다
         return entry
 
     def after(self, entry: dict, new_path: str):
         entry["after"] = new_path
         entry["after_identity"] = _identity(new_path)
         entry["state"] = "done"
-        self._save()
+        self._append(entry, sync=False)
 
     def failed(self, entry: dict, error: str):
         entry["state"] = "failed"
         entry["error"] = error
-        self._save()
+        self._append(entry, sync=False)
 
     def finish(self):
+        self._log.close()
         # 실제로 바뀐 파일이 없으면 백업 폴더를 남기지 않는다
         entries = [e for e in self.data["entries"] if e["state"] == "done"]
         if not entries:
@@ -100,6 +140,10 @@ class BackupJob:
         self.data["entries"] = entries
         self.data["status"] = "finished"
         self._save()
+        try:
+            os.unlink(os.path.join(self.folder, LOG_NAME))
+        except OSError:
+            pass
         return self.id
 
 
@@ -121,6 +165,8 @@ class BackupStore:
             except (OSError, ValueError):
                 continue
             j["folder"] = os.path.join(self.root, name)
+            if j.get("status") == "running":
+                _replay_log(j["folder"], j)
             j["bytes"] = _dir_size(j["folder"])
             out.append(j)
         return out
@@ -182,6 +228,10 @@ class BackupStore:
         if all(e.get("state") == "restored" for e in job["entries"]):
             job_data["status"] = "restored"
         _write_json(os.path.join(job["folder"], "journal.json"), job_data)
+        try:
+            os.unlink(os.path.join(job["folder"], LOG_NAME))  # 합친 내용이 journal.json 에 들어갔다
+        except OSError:
+            pass
         return done, errors
 
     def delete(self, job: dict):

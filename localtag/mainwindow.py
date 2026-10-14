@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import os
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 
-from PySide6.QtCore import QEvent, QItemSelectionModel, QSettings, QStandardPaths, Qt, QTimer, QUrl
+from PySide6.QtCore import QEvent, QItemSelection, QItemSelectionModel, QSettings, QStandardPaths, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QFileDialog, QHeaderView, QLabel, QLineEdit, QMainWindow,
@@ -14,21 +15,17 @@ from PySide6.QtWidgets import (
 
 from .actiondialogs import ActionEditDialog, ActionsDialog, PlansPreview, choose_action_type
 from . import music
-from .artworkdialog import ArtworkDialog
 from .tasks import run_task
 from .backup import BackupStore
-from .backupdialog import BackupDialog
-from .actions import ACTION_TYPES, ActionStore, describe, new_action, run_actions
+from .actions import ActionStore, describe, new_action, run_actions
 from .converters import CONVERTERS, AutoNumber
-from .export import ExportDialog, PlaylistDialog
 from .filetrack import find_moved
-from .exttags import ExtendedTagsDialog
 from .filterexpr import FilterError, compile_filter
 from .model import COLUMN_WIDTHS, COLUMNS, FileModel, SortProxy, fmt_length, fmt_size
 from .panel import TagPanel
 from .plan import Plan, UndoEntry, UndoItem
 from .tagio import (
-    AUDIO_EXTS, AudioFile, Options, UnsupportedFile, move_file, restore_snapshot, scan, take_snapshot,
+    AUDIO_EXTS, AudioFile, Options, move_file, restore_snapshot, scan,
 )
 
 APP_NAME = "LocalTag"
@@ -46,6 +43,7 @@ def app_version() -> str:
         except OSError:
             return "app"
     return "dev"
+LOAD_WORKERS = 4
 UNDO_LEVELS = 30
 UNDO_MEMORY = 512 * 1024 * 1024  # 실행 취소 기록이 이보다 커지면 오래된 것부터 버린다
 
@@ -69,11 +67,7 @@ class MainWindow(QMainWindow):
         self.actions = ActionStore(os.path.join(data_dir, "actions.json"))
         self.backups = BackupStore(os.path.join(data_dir, "Backups"))
         self.backup_enabled = self.settings.value("backup_enabled", True, bool)
-        try:
-            self.backups.prune(self.settings.value("backup_days", 30, int),
-                               self.settings.value("backup_max_gb", 5, int) * 1024 ** 3)
-        except OSError:
-            pass
+        QTimer.singleShot(0, self._prune_backups)  # 오래된 백업 정리는 창이 뜬 뒤에
 
         # ---- 파일 목록
         self.model = FileModel(self)
@@ -104,7 +98,12 @@ class MainWindow(QMainWindow):
             hh.restoreState(state)
         else:
             self.table.sortByColumn(COLUMNS.index(next(c for c in COLUMNS if c[0] == "path")), Qt.AscendingOrder)
-        self.table.selectionModel().selectionChanged.connect(self._on_selection)
+        # 선택이 한꺼번에 여러 번 바뀌어도(새로 고침 후 다시 선택 등) 패널은 한 번만 갱신한다
+        self._sel_timer = QTimer(self)
+        self._sel_timer.setSingleShot(True)
+        self._sel_timer.setInterval(0)
+        self._sel_timer.timeout.connect(self._on_selection)
+        self.table.selectionModel().selectionChanged.connect(lambda *_: self._sel_timer.start())
         self.table.doubleClicked.connect(lambda _: self.play())
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._table_menu)
@@ -161,6 +160,13 @@ class MainWindow(QMainWindow):
         else:
             self.resize(1280, 760)
         self._update_status()
+
+    def _prune_backups(self):
+        try:
+            self.backups.prune(self.settings.value("backup_days", 30, int),
+                               self.settings.value("backup_max_gb", 5, int) * 1024 ** 3)
+        except OSError:
+            pass
 
     # ------------------------------------------------------------ 메뉴
     def _act(self, menu, text, slot, shortcut=None, checkable=False, checked=False):
@@ -294,7 +300,7 @@ class MainWindow(QMainWindow):
                                 else "되돌릴 작업이 없습니다")
         self.tb_refresh.setEnabled(has_files)
         self.tb_clear.setEnabled(has_files)
-        self.tb_finder.setEnabled(bool(self.table.selectionModel().selectedRows()))
+        self.tb_finder.setEnabled(self.table.selectionModel().hasSelection())
 
     def _set_opt(self, name, value):
         setattr(self.opts, name, value)
@@ -344,24 +350,49 @@ class MainWindow(QMainWindow):
         m.exec(self.table.viewport().mapToGlobal(pos))
 
     # ------------------------------------------------------------ 선택
+    def _source_files(self, proxy_rows) -> list[AudioFile]:
+        files = self.model.files
+        if self.proxy.filter_fn is None:
+            # 필터가 없으면 표의 행 = 원본 행 (정렬은 원본 모델이 한다)
+            return [files[r] for r in proxy_rows]
+        return [files[self.proxy.mapToSource(self.proxy.index(r, 0)).row()] for r in proxy_rows]
+
     def selected_files(self) -> list[AudioFile]:
         # 화면에 보이는 순서대로 (텍스트→태그, %_counter% 등이 이 순서를 따른다)
-        rows = sorted(i.row() for i in self.table.selectionModel().selectedRows())
-        return [self.model.files[self.proxy.mapToSource(self.proxy.index(r, 0)).row()] for r in rows]
+        rows = set()
+        for rng in self.table.selectionModel().selection():
+            rows.update(range(rng.top(), rng.bottom() + 1))
+        return self._source_files(sorted(rows))
 
     def visible_files(self) -> list[AudioFile]:
-        return [self.model.files[self.proxy.mapToSource(self.proxy.index(r, 0)).row()]
-                for r in range(self.proxy.rowCount())]
+        if self.proxy.filter_fn is None:
+            return list(self.model.files)
+        return self._source_files(range(self.proxy.rowCount()))
+
+    def _select_rows(self, rows, flags=QItemSelectionModel.Select):
+        """표의 행 번호들을 한 번에 선택한다 (행마다 선택하면 그때마다 패널이 갱신된다)."""
+        sel = QItemSelection()
+        last_col = self.proxy.columnCount() - 1
+        rows = sorted(rows)
+        i = 0
+        while i < len(rows):
+            j = i
+            while j + 1 < len(rows) and rows[j + 1] == rows[j] + 1:
+                j += 1
+            sel.select(self.proxy.index(rows[i], 0), self.proxy.index(rows[j], last_col))
+            i = j + 1
+        self.table.selectionModel().select(sel, flags | QItemSelectionModel.Rows)
 
     def _on_selection(self, *_):
         self._confirm_pending()
-        self.panel.set_files(self.selected_files())
-        self._update_status()
+        sel = self.selected_files()
+        self.panel.set_files(sel)
+        self._update_status(sel)
 
     def invert_selection(self):
-        sm = self.table.selectionModel()
-        for r in range(self.proxy.rowCount()):
-            sm.select(self.proxy.index(r, 0), QItemSelectionModel.Toggle | QItemSelectionModel.Rows)
+        n = self.proxy.rowCount()
+        if n:
+            self._select_rows(range(n), QItemSelectionModel.Toggle)
 
     def _confirm_pending(self) -> bool:
         """패널에 저장하지 않은 변경이 있으면 물어본다. False면 취소."""
@@ -374,8 +405,9 @@ class MainWindow(QMainWindow):
             self.save(refresh_panel=False)
         return True
 
-    def _update_status(self):
-        sel = self.selected_files()
+    def _update_status(self, sel=None):
+        if sel is None:
+            sel = self.selected_files()
         shown = self.proxy.rowCount()
         files = sel or (self.visible_files() if self.proxy.filter_fn else self.model.files)
         total = sum(f.length for f in files)
@@ -424,22 +456,41 @@ class MainWindow(QMainWindow):
 
     def _load_files(self, paths, label):
         loaded, failed = [], []
+        opts = self.opts
+
+        def load(p):
+            try:
+                return AudioFile.load(p, opts), None
+            except Exception as e:  # 손상된 파일 하나 때문에 전체 불러오기가 멈추지 않게
+                return None, (p, str(e))
+
+        if len(paths) <= 8:
+            results = map(load, paths)
+            pool = None
+        else:
+            # 디스크에서 읽는 동안 기다리지 않도록 여러 파일을 동시에 읽는다 (외장 디스크·NAS에서 특히 빠르다)
+            pool = ThreadPoolExecutor(max_workers=LOAD_WORKERS)
+            results = pool.map(load, paths)
         prog = None
         if len(paths) > 30:
             prog = QProgressDialog(label, "취소", 0, len(paths), self)
             prog.setWindowModality(Qt.WindowModal)
             prog.setMinimumDuration(300)
-        for i, p in enumerate(paths):
+        try:
+            for i, (af, err) in enumerate(results):
+                if prog and i % 16 == 0:
+                    if prog.wasCanceled():
+                        break
+                    prog.setValue(i)
+                if af is not None:
+                    loaded.append(af)
+                else:
+                    failed.append(err)
+        finally:
+            if pool is not None:
+                pool.shutdown(wait=True, cancel_futures=True)
             if prog:
-                if prog.wasCanceled():
-                    break
-                prog.setValue(i)
-            try:
-                loaded.append(AudioFile.load(p, self.opts))
-            except (UnsupportedFile, OSError) as e:
-                failed.append((p, str(e)))
-        if prog:
-            prog.close()
+                prog.close()
         return loaded, failed
 
     def _find_moved(self, files):
@@ -454,7 +505,7 @@ class MainWindow(QMainWindow):
                 f.path = moved[f.path]
                 try:
                     self.model.replace(f, f)  # 표의 경로 칸 갱신
-                except StopIteration:
+                except KeyError:
                     pass
         if moved:
             self.statusBar().showMessage(f"옮겨진 파일 {len(moved)}개를 새 위치에서 다시 찾았습니다.", 6000)
@@ -467,13 +518,13 @@ class MainWindow(QMainWindow):
         selected = {f.path for f in self.selected_files()}
         loaded, failed = self._load_files(paths, "다시 읽는 중…")
         self.model.set_files(loaded)
-        sm = self.table.selectionModel()
-        for r, f in enumerate(self.model.files):
-            if f.path in selected:
-                sm.select(self.proxy.mapFromSource(self.model.index(r, 0)),
-                          QItemSelectionModel.Select | QItemSelectionModel.Rows)
-        self.panel.set_files(self.selected_files())
-        self._update_status()
+        rows = [r for r, f in enumerate(self.model.files) if f.path in selected]
+        if self.proxy.filter_fn is not None:
+            rows = [self.proxy.mapFromSource(self.model.index(r, 0)).row() for r in rows]
+        self._select_rows(r for r in rows if r >= 0)
+        sel = self.selected_files()
+        self.panel.set_files(sel)
+        self._update_status(sel)
         self._report_failures(failed, "읽지 못한 파일")
 
     def clear_list(self):
@@ -552,28 +603,30 @@ class MainWindow(QMainWindow):
                 prog.setValue(i)
             f = p.file
             old_path = f.path
-            snap = None
+            held = []  # 실행 취소용 스냅샷 — 첫 저장 때 파일을 읽으면서 함께 만든다 (따로 읽지 않는다)
             bentry = None
             try:
                 if job is not None and (p.touches_tags or p.new_path):
                     bentry = job.before(old_path, copy_file=p.touches_tags)
-                if p.touches_tags:
-                    snap = take_snapshot(old_path)
                 new = f
                 if p.remove_tags:
-                    new = new.remove_tags(self.opts)
+                    new = new.remove_tags(self.opts, snapshot=held)
                 if p.changes or p.pictures is not None:
-                    new = new.save(p.changes, p.pictures, self.opts)
+                    new = new.save(p.changes, p.pictures, self.opts, snapshot=None if held else held)
                 cur_path = new.path
                 if p.new_path:
                     move_file(cur_path, p.new_path)
                     cur_path = p.new_path
-                entry.items.append(UndoItem(old_path, cur_path, snap))
-                snap = None
+                entry.items.append(UndoItem(old_path, cur_path, held[0] if held else None))
+                held.clear()
                 if bentry is not None:
                     job.after(bentry, cur_path)
                     bentry = None
-                self.model.replace(f, AudioFile.load(cur_path, self.opts))
+                if new is f:
+                    new = AudioFile.load(cur_path, self.opts)
+                else:
+                    new.path = cur_path  # 저장 직후 읽은 정보를 그대로 쓴다 (이름 바꾸기는 내용을 바꾸지 않는다)
+                self.model.replace(f, new)
                 for path, data in p.exports:
                     with open(path, "wb") as fh:
                         fh.write(data)
@@ -581,9 +634,9 @@ class MainWindow(QMainWindow):
                 failed.append((old_path, str(e)))
                 if bentry is not None:
                     job.failed(bentry, str(e))
-                if snap is not None and os.path.exists(old_path):
+                if held and os.path.exists(old_path):
                     # 일부만 바뀐 채로 남지 않게 되돌려 둔다
-                    entry.items.append(UndoItem(old_path, old_path, snap))
+                    entry.items.append(UndoItem(old_path, old_path, held[0]))
                 try:
                     self.model.replace(f, AudioFile.load(f.path, self.opts))
                 except Exception:
@@ -609,6 +662,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ 백업
     def show_backups(self):
         self._confirm_pending()
+        from .backupdialog import BackupDialog  # 필요할 때만 불러와 앱이 빨리 켜지게
         BackupDialog(self).exec()
 
     def after_backup_restore(self, done):
@@ -630,10 +684,13 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ 실행 취소
     def _push_undo(self, entry):
         self.undo_stack.append(entry)
-        while len(self.undo_stack) > UNDO_LEVELS or (
-                len(self.undo_stack) > 1 and sum(e.size_estimate() for e in self.undo_stack) > UNDO_MEMORY):
+        while len(self.undo_stack) > UNDO_LEVELS or (len(self.undo_stack) > 1 and self._undo_size() > UNDO_MEMORY):
             self.undo_stack.pop(0)
         self._update_undo_action()
+
+    def _undo_size(self):
+        seen = set()  # 여러 기록이 함께 쓰는 커버는 한 번만 센다
+        return sum(e.size_estimate(seen) for e in self.undo_stack)
 
     def _update_undo_action(self):
         if self.undo_stack:
@@ -655,8 +712,9 @@ class MainWindow(QMainWindow):
                 if item.new_path != item.old_path:
                     move_file(item.new_path, item.old_path)
                 if item.snapshot is not None:
-                    restore_snapshot(item.old_path, item.snapshot)
-                restored = AudioFile.load(item.old_path, self.opts)
+                    restored = restore_snapshot(item.old_path, item.snapshot, opts=self.opts)
+                else:
+                    restored = AudioFile.load(item.old_path, self.opts)
                 f = by_path.get(item.new_path)
                 if f is not None:
                     self.model.replace(f, restored)
@@ -949,6 +1007,7 @@ class MainWindow(QMainWindow):
         if not files:
             return
         cache = QStandardPaths.writableLocation(QStandardPaths.CacheLocation)
+        from .artworkdialog import ArtworkDialog  # 인터넷 모듈(ssl 등)은 이때 처음 불러온다
         dlg = ArtworkDialog(self, files, self.settings, os.path.join(cache, "recent-artwork"))
         if dlg.exec() and dlg.picture is not None:
             plans = []
@@ -982,6 +1041,7 @@ class MainWindow(QMainWindow):
         files = self._files_for_command()
         if not files:
             return
+        from .exttags import ExtendedTagsDialog
         dlg = ExtendedTagsDialog(self, files)
         if not dlg.exec():
             return
@@ -994,12 +1054,14 @@ class MainWindow(QMainWindow):
         if not self.model.files:
             QMessageBox.information(self, APP_NAME, "내보낼 파일이 없습니다.")
             return
+        from .export import ExportDialog
         ExportDialog(self, self.selected_files(), self.visible_files(), self.settings, self.last_dir).exec()
 
     def make_playlist(self):
         files = self._files_for_command()
         if not files:
             return
+        from .export import PlaylistDialog
         dlg = PlaylistDialog(self, files, self.settings)
         if dlg.exec():
             self.statusBar().showMessage(f"재생목록을 만들었습니다: {os.path.basename(dlg.saved_path)}", 5000)
@@ -1027,9 +1089,10 @@ class MainWindow(QMainWindow):
     def remove_from_list(self):
         files = self.selected_files()
         if files:
+            self.table.selectionModel().clearSelection()  # 지우는 행마다 선택이 바뀌지 않게 먼저 비운다
             self.panel.set_files([])
             self.model.remove(files)
-            self._update_status()
+            self._update_status([])
 
     def play(self):
         files = self.selected_files()

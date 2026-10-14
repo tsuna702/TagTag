@@ -1,11 +1,11 @@
 """왼쪽 태그 편집 패널 (Mp3tag의 Tag Panel)."""
 from __future__ import annotations
 
-import hashlib
 import os
+from collections import OrderedDict
 
-from PySide6.QtCore import QBuffer, QByteArray, QIODevice, Qt, Signal
-from PySide6.QtGui import QGuiApplication, QImage, QPixmap
+from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QSize, Qt, Signal
+from PySide6.QtGui import QGuiApplication, QImage, QImageReader, QPixmap
 from PySide6.QtWidgets import (
     QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QMenu,
     QMessageBox, QPushButton, QSizePolicy, QVBoxLayout, QWidget,
@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 from .model import fmt_size
 from .tagio import FIELD_LABELS, FIELDS, SEP, Picture, guess_mime
 
+THUMB_CACHE = 16
 KEEP = "< 유지 >"
 BLANK = "< 비우기 >"
 COVER_SIZE = 220
@@ -75,6 +76,7 @@ class TagPanel(QWidget):
         self.files = []
         self.initial: dict[str, str] = {}
         self.cover_op = None  # None | ("set", Picture) | ("remove",)
+        self._thumbs = OrderedDict()  # 최근에 그린 커버 (같은 앨범을 오갈 때 다시 그리지 않게)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -160,14 +162,16 @@ class TagPanel(QWidget):
 
     def _common_cover(self):
         """선택한 파일들의 대표 커버가 모두 같으면 (True, Picture|None), 다르면 (False, None)."""
-        keys = set()
-        first = None
-        for f in self.files:
+        if not self.files:
+            return True, None
+        first = self.files[0].cover
+        for f in self.files[1:]:
             c = f.cover
-            keys.add(hashlib.md5(c.data).digest() if c else None)
-            if len(keys) > 1:
+            if c is None or first is None:
+                if c is not first:
+                    return False, None
+            elif c.data is not first.data and c.data != first.data:  # 같은 앨범은 보통 같은 bytes 를 함께 쓴다
                 return False, None
-            first = c
         return True, first
 
     def _show_cover(self):
@@ -194,18 +198,49 @@ class TagPanel(QWidget):
             self.cover.setText("커버 없음\n(이미지를 끌어다 놓으세요)")
             self.cover_info.setText("변경됨: 삭제" if self.cover_op else "")
             return
-        pm = QPixmap()
-        if pm.loadFromData(pic.data):
-            self.cover.setPixmap(pm.scaled(COVER_SIZE - 2, COVER_SIZE - 2,
-                                           Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        thumb = self._thumbnail(pic.data)
+        if thumb is not None:
+            pm, size = thumb
+            self.cover.setPixmap(pm)
             fmt = pic.mime.split("/")[-1].upper()
-            info = f"{pm.width()}×{pm.height()}  {fmt}  {fmt_size(len(pic.data))}"
+            info = f"{size.width()}×{size.height()}  {fmt}  {fmt_size(len(pic.data))}"
         else:
             self.cover.setText("(표시할 수 없는 이미지)")
             info = fmt_size(len(pic.data))
         if self.cover_op:
             info = "변경됨 · " + info
         self.cover_info.setText(info)
+
+    def _thumbnail(self, data: bytes):
+        """(표시용 QPixmap, 원본 크기). 작게 줄여 가며 읽으므로 큰 커버도 빨리 그린다."""
+        dpr = self.devicePixelRatioF()
+        key = (id(data), len(data), dpr)
+        cache = self._thumbs
+        hit = cache.get(key)
+        if hit is not None and hit[0] is data:
+            cache.move_to_end(key)
+            return hit[1]
+        ba = QByteArray(data)
+        buf = QBuffer(ba)
+        buf.open(QIODevice.ReadOnly)
+        reader = QImageReader(buf)
+        size = reader.size()
+        box = int((COVER_SIZE - 2) * dpr)
+        if size.isValid() and (size.width() > box or size.height() > box):
+            reader.setScaledSize(size.scaled(box, box, Qt.KeepAspectRatio))
+        img = reader.read()
+        if img.isNull():
+            return None
+        if not size.isValid():
+            size = img.size()
+        if img.width() > box or img.height() > box:
+            img = img.scaled(box, box, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        pm = QPixmap.fromImage(img)
+        pm.setDevicePixelRatio(dpr)  # 레티나 화면에서도 선명하게
+        cache[key] = (data, (pm, QSize(size)))  # data 를 함께 들고 있어 id 가 재사용되지 않는다
+        while len(cache) > THUMB_CACHE:
+            cache.popitem(last=False)
+        return pm, size
 
     # ------------------------------------------------------------ 커버 조작
     def _cover_menu(self, pos):

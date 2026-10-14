@@ -19,25 +19,42 @@ def _media_root(path):
     return None
 
 
-def _scan(root, missing, found, skip=None):
-    for d, dirs, names in os.walk(root):
-        if skip and (d == skip or d.startswith(skip + os.sep)):
-            dirs[:] = []
+def _scan(root, missing, found):
+    """root 아래를 돌며 찾는 파일 번호와 같은 파일을 찾는다.
+
+    디렉터리 목록에 이미 들어 있는 파일 번호(inode)로 먼저 거르고, 맞을 때만 stat 으로 확인한다
+    (미디어 폴더 전체를 훑어도 파일마다 stat 을 부르지 않아 빠르다). 목록의 번호가 실제 번호와 다른
+    디스크(일부 네트워크·외장 디스크)에서는 파일마다 stat 으로 확인한다.
+    """
+    inodes = {ino for _, ino in missing}
+    trust = None  # 목록의 파일 번호를 믿어도 되는지 (첫 파일에서 확인)
+    stack = [root]
+    while stack and missing:
+        d = stack.pop()
+        try:
+            it = os.scandir(d)
+        except OSError:
             continue
-        dirs[:] = [x for x in dirs if not x.startswith(".")]
-        for n in names:
-            if n.startswith("."):
-                continue
-            p = os.path.join(d, n)
-            try:
-                st = os.stat(p)
-            except OSError:
-                continue
-            old = missing.pop((st.st_dev, st.st_ino), None)
-            if old is not None:
-                found[old] = p
-        if not missing:
-            return
+        with it:
+            for e in it:
+                if e.name.startswith("."):
+                    continue
+                try:
+                    if e.is_dir(follow_symlinks=False):
+                        stack.append(e.path)
+                        continue
+                    if trust and e.inode() not in inodes:
+                        continue
+                    st = e.stat(follow_symlinks=False)
+                    if trust is None:
+                        trust = st.st_ino == e.inode()
+                except OSError:
+                    continue
+                old = missing.pop((st.st_dev, st.st_ino), None)
+                if old is not None:
+                    found[old] = e.path
+                    if not missing:
+                        return
 
 
 def find_moved(entries, cancelled=lambda: False):

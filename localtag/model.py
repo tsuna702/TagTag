@@ -73,10 +73,18 @@ COLUMN_WIDTHS = {
 RIGHT_ALIGNED = {"length", "bitrate", "samplerate", "size", "cover"}
 
 
+DISPLAY_ROLES = (Qt.DisplayRole, Qt.ToolTipRole)
+
+
 class FileModel(QAbstractTableModel):
+    """파일 목록. 정렬도 여기서 한다 (키를 한 번씩만 계산해 정렬하므로 수천 곡도 즉시 끝난다)."""
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.files: list[AudioFile] = []
+        self.sort_column = -1
+        self.sort_order = Qt.AscendingOrder
+        self._rows: dict[int, int] | None = None  # id(파일) → 행 (필요할 때 만든다)
 
     def rowCount(self, parent=QModelIndex()):
         return 0 if parent.isValid() else len(self.files)
@@ -90,22 +98,61 @@ class FileModel(QAbstractTableModel):
         return None
 
     def data(self, index, role=Qt.DisplayRole):
+        # 표를 그릴 때 칸마다 여러 역할을 묻는다. 쓰지 않는 역할은 바로 돌려보낸다
         if not index.isValid():
             return None
-        f = self.files[index.row()]
-        col = COLUMNS[index.column()]
-        if role in (Qt.DisplayRole, Qt.ToolTipRole):
-            return col[2](f)
+        if role in DISPLAY_ROLES:
+            return COLUMNS[index.column()][2](self.files[index.row()])
+        if role == Qt.TextAlignmentRole:
+            if COLUMNS[index.column()][0] in RIGHT_ALIGNED:
+                return int(Qt.AlignRight | Qt.AlignVCenter)
+            return None
         if role == SORT_ROLE:
-            return col[3](f)
-        if role == Qt.TextAlignmentRole and col[0] in RIGHT_ALIGNED:
-            return int(Qt.AlignRight | Qt.AlignVCenter)
+            return COLUMNS[index.column()][3](self.files[index.row()])
         return None
+
+    def row_of(self, f: AudioFile) -> int:
+        if self._rows is None:
+            self._rows = {id(x): i for i, x in enumerate(self.files)}
+        return self._rows[id(f)]
+
+    # ---- 정렬
+    def _sorted(self, files):
+        if self.sort_column < 0:
+            return list(files)
+        key = COLUMNS[self.sort_column][3]
+        # 값이 같으면 전체 경로 순 (내림차순이어도 같은 값끼리는 경로 오름차순 — 안정 정렬)
+        out = sorted(files, key=lambda f: f.path.lower())
+        try:
+            out.sort(key=key, reverse=self.sort_order == Qt.DescendingOrder)
+        except TypeError:
+            out.sort(key=lambda f: str(key(f)), reverse=self.sort_order == Qt.DescendingOrder)
+        return out
+
+    def sort(self, column, order=Qt.AscendingOrder):
+        self.sort_column, self.sort_order = column, order
+        self._resort()
+
+    def _resort(self):
+        if self.sort_column < 0 or len(self.files) < 2:
+            return
+        new = self._sorted(self.files)
+        if all(a is b for a, b in zip(new, self.files)):
+            return
+        self.layoutAboutToBeChanged.emit()
+        old_list = self.persistentIndexList()
+        row_of = {id(f): i for i, f in enumerate(new)}
+        new_list = [self.index(row_of[id(self.files[i.row()])], i.column()) for i in old_list]
+        self.files = new
+        self._rows = None
+        self.changePersistentIndexList(old_list, new_list)
+        self.layoutChanged.emit()
 
     # ---- 조작
     def set_files(self, files):
         self.beginResetModel()
-        self.files = list(files)
+        self.files = self._sorted(files)
+        self._rows = None
         self.endResetModel()
 
     def add_files(self, files):
@@ -115,27 +162,49 @@ class FileModel(QAbstractTableModel):
             return
         self.beginInsertRows(QModelIndex(), len(self.files), len(self.files) + len(new) - 1)
         self.files.extend(new)
+        self._rows = None
         self.endInsertRows()
+        self._resort()
 
     def replace(self, old: AudioFile, new: AudioFile):
-        row = next(i for i, f in enumerate(self.files) if f is old)
+        """파일 하나를 새로 읽은 것으로 바꾼다. 행 위치는 그대로 둔다 (편집한 줄이 다른 곳으로 튀지 않게)."""
+        row = self.row_of(old)
         self.files[row] = new
+        if new is not old:
+            del self._rows[id(old)]
+            self._rows[id(new)] = row
         self.dataChanged.emit(self.index(row, 0), self.index(row, len(COLUMNS) - 1))
 
     def remove(self, files):
         drop = {id(f) for f in files}
-        rows = sorted((i for i, f in enumerate(self.files) if id(f) in drop), reverse=True)
-        for r in rows:
-            self.beginRemoveRows(QModelIndex(), r, r)
-            del self.files[r]
+        rows = [i for i, f in enumerate(self.files) if id(f) in drop]
+        # 이어진 행은 한 번에 지운다 (뒤에서부터 지워야 앞쪽 행 번호가 그대로다)
+        end = len(rows)
+        while end:
+            start = end - 1
+            while start and rows[start - 1] == rows[start] - 1:
+                start -= 1
+            first, last = rows[start], rows[end - 1]
+            self.beginRemoveRows(QModelIndex(), first, last)
+            del self.files[first:last + 1]
+            self._rows = None
             self.endRemoveRows()
+            end = start
 
 
 class SortProxy(QSortFilterProxyModel):
+    """필터만 한다. 정렬은 원본 모델(FileModel.sort)에 맡겨 표의 행 순서 = 원본 순서가 되게 한다."""
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setSortRole(SORT_ROLE)
         self.filter_fn = None
+
+    def setSourceModel(self, model):
+        super().setSourceModel(model)
+        self._src = model
+
+    def sort(self, column, order=Qt.AscendingOrder):
+        self._src.sort(column, order)
 
     def set_filter(self, fn):
         if hasattr(self, "beginFilterChange"):  # Qt 6.10+
@@ -149,17 +218,4 @@ class SortProxy(QSortFilterProxyModel):
     def filterAcceptsRow(self, row, parent):
         if self.filter_fn is None:
             return True
-        return self.filter_fn(self.sourceModel().files[row])
-
-    def lessThan(self, left, right):
-        a = self.sourceModel().data(left, SORT_ROLE)
-        b = self.sourceModel().data(right, SORT_ROLE)
-        try:
-            if a == b:
-                # 값이 같으면 전체 경로 순으로
-                fa = self.sourceModel().files[left.row()].path.lower()
-                fb = self.sourceModel().files[right.row()].path.lower()
-                return fa < fb
-            return a < b
-        except TypeError:
-            return str(a) < str(b)
+        return self.filter_fn(self._src.files[row])

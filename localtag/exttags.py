@@ -1,7 +1,6 @@
 """확장 태그 편집기 (Mp3tag의 Extended Tags)."""
 from __future__ import annotations
 
-import hashlib
 import os
 
 from PySide6.QtCore import QSize, Qt
@@ -35,8 +34,10 @@ def display_name(key: str) -> str:
     return DISPLAY_NAMES.get(key, key)
 
 
-def _pics_key(pics):
-    return tuple((p.type, p.desc, hashlib.md5(p.data).digest()) for p in pics)
+def _same_pics(a, b) -> bool:
+    # 같은 앨범의 커버는 보통 같은 bytes 를 함께 쓰므로 대부분 내용을 비교하지 않고 끝난다
+    return len(a) == len(b) and all(
+        x.type == y.type and x.desc == y.desc and (x.data is y.data or x.data == y.data) for x, y in zip(a, b))
 
 
 class ExtendedTagsDialog(QDialog):
@@ -86,8 +87,7 @@ class ExtendedTagsDialog(QDialog):
 
         # ---- 커버
         v.addWidget(QLabel("<b>커버</b>"))
-        keys = {_pics_key(f.pictures) for f in files}
-        self.pics_differ = len(keys) > 1
+        self.pics_differ = any(not _same_pics(files[0].pictures, f.pictures) for f in files[1:])
         self.pictures = [] if self.pics_differ else [Picture(p.data, p.mime, p.type, p.desc)
                                                      for p in files[0].pictures]
         self.pics_changed = False
