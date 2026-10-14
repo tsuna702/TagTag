@@ -270,12 +270,15 @@ def automation_status() -> str:
 
 # ---- 'Apple Music 보관함 접근'(시스템 설정의 '미디어 및 Apple Music') 권한
 # Music 제어(자동화)와는 따로 관리되는 권한이다. Music에 반영할 때 Music이 이 권한을 요구해 처음 반영할 때 권한 창이
-# 뜨므로, 앱을 켤 때 미리 상태를 보고 받아 둔다. 공개 API로는 상태를 알 수 없어 macOS의 TCC 프레임워크를 쓰고,
-# 쓸 수 없으면 'unknown' 으로 두고 예전처럼 Music이 필요할 때 묻게 둔다.
+# 뜨므로, 앱을 켤 때 미리 상태를 보고 받아 둔다. 공개 API로는 상태를 알 수 없어 상태 확인(창을 띄우지 않음)에만
+# macOS의 TCC 프레임워크를 쓰고, 쓸 수 없으면 'unknown' 으로 두어 예전처럼 Music이 필요할 때 묻게 둔다.
+# 권한 요청은 Apple의 공개 프레임워크(iTunesLibrary)로 보관함을 한 번 여는 방식으로 한다 — macOS가 같은 권한 창을 띄운다.
+# (TCC 의 요청 함수는 결과를 받을 블록을 요구해 ctypes 로 부르면 응답 순간 앱이 죽는다. 0.6.4~0.6.5 크래시)
 _MEDIA_SERVICE = b"kTCCServiceMediaLibrary"
 
 
 def _tcc_call(name):
+    """TCCAccessPreflight 처럼 (서비스, 옵션) 만 받고 바로 결과를 돌려주는 함수만 부를 것."""
     tcc = ctypes.CDLL("/System/Library/PrivateFrameworks/TCC.framework/TCC")
     cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
     cf.CFStringCreateWithCString.restype = ctypes.c_void_p
@@ -299,12 +302,28 @@ def media_library_status() -> str:
         return "unknown"
 
 
-def request_media_library() -> bool:
-    """macOS 권한 창을 띄워 'Apple Music 보관함 접근'을 받는다. 사용자가 답할 때까지 기다린다 (작업 스레드에서 부를 것)."""
+def request_media_library(cancelled=lambda: False, timeout=180) -> bool:
+    """macOS 권한 창을 띄워 'Apple Music 보관함 접근'을 받는다. 사용자가 답할 때까지 기다린다 (작업 스레드에서 부를 것).
+    허용되면 True."""
     try:
-        return bool(_tcc_call("TCCAccessRequest"))
+        o = _bridge()
+        ctypes.cdll.LoadLibrary("/System/Library/Frameworks/iTunesLibrary.framework/iTunesLibrary")
+        o.lib.objc_autoreleasePoolPush.restype = ctypes.c_void_p
+        o.lib.objc_autoreleasePoolPop.argtypes = [ctypes.c_void_p]
+        pool = o.lib.objc_autoreleasePoolPush()
+        try:
+            err = ctypes.c_void_p()
+            o.send(o.cls("ITLibrary"), "libraryWithAPIVersion:error:", o.nsstr("1.0"), ctypes.byref(err),
+                   argtypes=[ctypes.c_void_p, ctypes.c_void_p])
+        finally:
+            o.lib.objc_autoreleasePoolPop(pool)
     except Exception:
         return False
+    # 권한 창이 따로 떠 있는 동안에는 답할 때까지 기다린다
+    end = time.monotonic() + timeout
+    while media_library_status() == "ask" and time.monotonic() < end and not cancelled():
+        time.sleep(0.3)
+    return media_library_status() == "granted"
 
 
 def open_privacy_settings(kind: str = "automation"):

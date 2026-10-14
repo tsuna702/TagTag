@@ -1056,7 +1056,7 @@ class MainWindow(QMainWindow):
 
         def job(prog, cancelled):
             if music.media_library_status() == "ask":
-                music.request_media_library()
+                music.request_media_library(cancelled)
             if need_auto:
                 music.ensure_access(launch=True)
             return music.media_library_status()
