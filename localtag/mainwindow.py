@@ -182,7 +182,7 @@ class MainWindow(QMainWindow):
     def _preload(self):
         """창이 뜬 직후 나머지 창 모듈을 미리 불러 둔다. 앱이 켜져 있는 동안 앱 파일이 새 버전으로
         바뀌어도(새로 빌드) 나중에 창을 열 때 다른 버전의 모듈을 읽지 않게 한다."""
-        from . import artworkdialog, backupdialog, export, extractdialog, exttags  # noqa: F401
+        from . import artworkdialog, backupdialog, covermatch, export, extractdialog, exttags  # noqa: F401
 
     def _prune_backups(self):
         try:
@@ -257,6 +257,7 @@ class MainWindow(QMainWindow):
 
         m = mb.addMenu("커버")
         self._act(m, "앨범아트 찾기 · 가져오기…", self.find_artwork, "Ctrl+Shift+A")
+        self._act(m, "커버 짝짓기 (그림 파일을 곡마다)…", self.match_covers, "Ctrl+Shift+J")
         self._act(m, "커버 크기 조정…", self.resize_covers, "Ctrl+Shift+K")
         m.addSeparator()
         self._act(m, "앨범아트 추출 (링크 · 보관함 · 목록 · YouTube)…", self.extract_artwork, "Ctrl+Shift+X")
@@ -1140,6 +1141,28 @@ class MainWindow(QMainWindow):
                     pics.insert(0, pic)
                 plans.append(Plan(f, pictures=pics))
             self.apply_plans(plans, "커버 바꾸기")
+
+    def match_covers(self):
+        """곡마다 그림 파일을 직접 골라 커버로 넣는다 (JDownloader로 받은 섬네일 등)."""
+        self._confirm_pending()
+        files = self.selected_files() or self.visible_files()
+        if not files:
+            QMessageBox.information(self, APP_NAME, "커버를 넣을 곡을 목록에 먼저 불러오세요.")
+            return
+        from .covermatch import CoverMatchDialog
+        dlg = CoverMatchDialog(self, files, self.settings)
+        if not dlg.exec():
+            return
+        plans = []
+        for f, pic in dlg._result:
+            pics = list(f.pictures)
+            idx = f.primary_index()
+            if idx >= 0:
+                pics[idx] = pic
+            else:
+                pics.insert(0, pic)
+            plans.append(Plan(f, pictures=pics))
+        self.apply_plans(plans, "커버 짝짓기")
 
     def extract_artwork(self):
         """앨범아트를 이미지 파일로 저장하는 창 (앨범아트 추출기). 창은 하나만 열어 둔다."""
