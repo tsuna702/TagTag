@@ -13,6 +13,22 @@ a = Analysis(
     excludes=["tkinter", "PySide6.QtNetwork", "PySide6.QtQml", "PySide6.QtQuick",
               "PySide6.QtWebEngineCore", "PySide6.QtMultimedia", "PySide6.QtPdf"],
 )
+# 쓰지 않는 Qt 플러그인(가상 키보드 입력기, PDF 이미지 읽기, 터치 장치)과
+# 그 플러그인만 쓰는 프레임워크(QtQuick·QtQml·QtPdf·QtNetwork 등, 약 20MB)는 넣지 않는다
+DROP = ("/platforminputcontexts/", "/libqpdf.", "/libqtuiotouchplugin.",
+        "QtQuick", "QtQml", "QtVirtualKeyboard", "QtPdf", "QtNetwork", "QtOpenGL")
+
+
+def _keep(entry):
+    dest = entry[0].replace(os.sep, "/")
+    if "/translations/" in dest and not dest.endswith("_ko.qm"):
+        return False  # Qt 번역 파일은 한국어만
+    return not any(d in dest for d in DROP)
+
+
+a.binaries = [b for b in a.binaries if _keep(b)]
+a.datas = [d for d in a.datas if _keep(d)]
+
 pyz = PYZ(a.pure)
 exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="LocalTag",
           console=False, argv_emulation=False)
