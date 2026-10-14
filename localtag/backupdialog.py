@@ -1,14 +1,13 @@
 """백업 관리자."""
 from __future__ import annotations
 
-import subprocess
-
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox, QHBoxLayout, QHeaderView, QLabel,
     QMessageBox, QPushButton, QSpinBox, QTableWidget, QTableWidgetItem, QVBoxLayout,
 )
 
 from .model import fmt_size
+from .osutil import REVEAL_LABEL, open_folder
 
 STATUS = {"finished": "되돌릴 수 있음", "restored": "되돌림", "running": "중단됨"}
 
@@ -67,7 +66,7 @@ class BackupDialog(QDialog):
         row = QHBoxLayout()
         self.btn_restore = QPushButton("이 작업 되돌리기…")
         self.btn_restore.clicked.connect(self.restore)
-        b_open = QPushButton("Finder에서 보기")
+        b_open = QPushButton(REVEAL_LABEL)
         b_open.clicked.connect(self.reveal)
         b_del = QPushButton("삭제")
         b_del.clicked.connect(self.delete)
@@ -149,7 +148,7 @@ class BackupDialog(QDialog):
 
     def reveal(self):
         j = self.current()
-        subprocess.run(["open", j["folder"] if j else self.store.root], check=False)
+        open_folder(j["folder"] if j else self.store.root)
 
     def delete(self):
         j = self.current()

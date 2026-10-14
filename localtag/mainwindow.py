@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import os
-import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
 
 from PySide6.QtCore import QEvent, QItemSelection, QItemSelectionModel, QSettings, QStandardPaths, Qt, QTimer, QUrl
@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 
 from .actiondialogs import ActionEditDialog, ActionsDialog, PlansPreview, choose_action_type
 from . import music
+from .osutil import IS_MAC, IS_WIN, REVEAL_LABEL, keys, reveal
 from .tasks import run_task
 from .backup import BackupStore
 from .actions import ActionStore, describe, new_action, run_actions
@@ -35,8 +36,13 @@ RELEASES_URL = "https://github.com/tsuna702/TagTag/releases"
 
 def app_version() -> str:
     """앱 번들의 버전 (개발 중 실행이면 'dev'). 새 빌드마다 macOS 권한을 다시 묻기 때문에 버전별로 기록한다."""
-    import sys
     if getattr(sys, "frozen", False):
+        if not IS_MAC:  # Windows 빌드는 build 때 _version.py 를 만들어 넣는다
+            try:
+                from ._version import VERSION
+                return VERSION
+            except ImportError:
+                return "app"
         import plistlib
         try:
             info = os.path.join(os.path.dirname(os.path.dirname(sys.executable)), "Info.plist")
@@ -48,12 +54,16 @@ def app_version() -> str:
 
 
 def _app_icon():
-    """앱 아이콘 (번들의 LocalTag.icns, 개발 중이면 packaging/LocalTag.icns)."""
-    import sys
+    """앱 아이콘 (번들의 LocalTag.icns, 개발 중이면 packaging/LocalTag.icns. Windows 는 .ico)."""
     from PySide6.QtGui import QIcon
     here = os.path.dirname(os.path.abspath(__file__))
-    for path in (os.path.join(os.path.dirname(os.path.dirname(sys.executable)), "Resources", "LocalTag.icns"),
-                 os.path.join(os.path.dirname(here), "packaging", "LocalTag.icns")):
+    if IS_MAC:
+        paths = (os.path.join(os.path.dirname(os.path.dirname(sys.executable)), "Resources", "LocalTag.icns"),
+                 os.path.join(os.path.dirname(here), "packaging", "LocalTag.icns"))
+    else:
+        paths = (os.path.join(getattr(sys, "_MEIPASS", os.path.dirname(sys.executable)), "LocalTag.ico"),
+                 os.path.join(os.path.dirname(here), "packaging", "LocalTag.ico"))
+    for path in paths:
         if os.path.exists(path):
             icon = QIcon(path)
             if not icon.isNull():
@@ -148,7 +158,7 @@ class MainWindow(QMainWindow):
         self.filter_edit = QLineEdit()
         self.filter_edit.setClearButtonEnabled(True)
         self.filter_edit.setPlaceholderText(
-            "필터 (⌘F) — 예: 아이유 · artist HAS 아이유 · year GREATER 2010 AND genre MISSING")
+            keys("필터 (⌘F) — 예: 아이유 · artist HAS 아이유 · year GREATER 2010 AND genre MISSING"))
         self.filter_edit.textChanged.connect(lambda _: self.filter_timer.start())
         self.filter_edit.installEventFilter(self)
         self.filter_timer = QTimer(self)
@@ -250,9 +260,11 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         quit_act = self._act(m, "종료", self.close, QKeySequence.Quit)
         quit_act.setMenuRole(QAction.QuitRole)
-        # macOS에서는 메뉴 막대의 'LocalTag' 메뉴 맨 위로 옮겨진다
+        # macOS에서는 메뉴 막대의 'LocalTag' 메뉴 맨 위로 옮겨진다 (Windows 는 아래 도움말 메뉴로)
         about = self._act(m, f"{APP_NAME} 정보", self.show_about)
         about.setMenuRole(QAction.AboutRole)
+        if not IS_MAC:
+            m.removeAction(about)
 
         m = mb.addMenu("편집")
         self.undo_act = self._act(m, "실행 취소", self.undo, QKeySequence.Undo)
@@ -269,14 +281,16 @@ class MainWindow(QMainWindow):
         self._act(m, "아래로 이동", lambda: self.move_selection(1), "Ctrl+Alt+Down")
         self._act(m, "목록 순서대로 트랙 번호…", self.number_tracks)
         m.addSeparator()
-        for a in (self._act(m, "목록에서 제거", self.remove_from_list, "Backspace"),
-                  self._act(m, "태그 제거…", self.remove_tags, "Ctrl+Shift+Backspace")):
+        # Windows 는 Delete 키가 익숙하다
+        rm_key = "Backspace" if IS_MAC else "Delete"
+        for a in (self._act(m, "목록에서 제거", self.remove_from_list, rm_key),
+                  self._act(m, "태그 제거…", self.remove_tags, f"Ctrl+Shift+{rm_key}")):
             # 태그 입력 중에 Backspace가 가로채이지 않도록 목록에서만 동작
             a.setShortcutContext(Qt.WidgetWithChildrenShortcut)
             self.table.addAction(a)
         m.addSeparator()
         self._act(m, "재생", self.play, "Ctrl+P")
-        self._act(m, "Finder에서 보기", self.reveal, "Ctrl+Shift+R")
+        self._act(m, REVEAL_LABEL, self.reveal, "Ctrl+Shift+R")
         m.addSeparator()
         self._act(m, "필터", self.focus_filter, QKeySequence.Find)
 
@@ -293,22 +307,8 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         self._act(m, "앨범아트 추출 (링크 · 보관함 · 목록 · YouTube)…", self.extract_artwork, "Ctrl+Shift+X")
 
-        m = mb.addMenu("Music")
-        self._act(m, "Apple Music에 반영 (새로 읽기)", self.music_refresh, "Ctrl+Shift+M")
-        self._act(m, "저장한 뒤 자동으로 Music에 반영", lambda on: self.settings.setValue("music_auto", on),
-                  checkable=True, checked=self.settings.value("music_auto", False, bool))
-        sub = m.addMenu("반영 속도")
-        grp = QActionGroup(self)
-        cur = self.settings.value("music_pace", music.DEFAULT_PACE, str)
-        for key, label in music.PACE_LABELS.items():
-            a = self._act(sub, label, lambda on, key=key: on and self.settings.setValue("music_pace", key),
-                          checkable=True, checked=key == cur)
-            grp.addAction(a)
-        m.addSeparator()
-        self._act(m, "Music에서 선택한 곡 추가", self.music_add_selection, "Ctrl+Shift+I")
-        m.addSeparator()
-        self._act(m, "Music 권한 확인", self.music_check)
-        self._act(m, "Music 권한 설정 열기…", music.open_privacy_settings)
+        if IS_MAC:  # Apple Music 연동은 macOS 에서만
+            self._build_music_menu(mb)
 
         m = mb.addMenu("액션")
         self._act(m, "액션 그룹…", self.run_action_groups, "Alt+6")
@@ -336,6 +336,27 @@ class MainWindow(QMainWindow):
                   checkable=True, checked=self.opts.safe_save)
         m.addSeparator()
         self._act(m, "백업…", self.show_backups, "Ctrl+Shift+B")
+        if not IS_MAC:  # macOS 는 앱 메뉴로 옮겨지므로 Windows 에만 도움말 메뉴
+            m = mb.addMenu("도움말")
+            m.addAction(about)
+
+    def _build_music_menu(self, mb):
+        m = mb.addMenu("Music")
+        self._act(m, "Apple Music에 반영 (새로 읽기)", self.music_refresh, "Ctrl+Shift+M")
+        self._act(m, "저장한 뒤 자동으로 Music에 반영", lambda on: self.settings.setValue("music_auto", on),
+                  checkable=True, checked=self.settings.value("music_auto", False, bool))
+        sub = m.addMenu("반영 속도")
+        grp = QActionGroup(self)
+        cur = self.settings.value("music_pace", music.DEFAULT_PACE, str)
+        for key, label in music.PACE_LABELS.items():
+            a = self._act(sub, label, lambda on, key=key: on and self.settings.setValue("music_pace", key),
+                          checkable=True, checked=key == cur)
+            grp.addAction(a)
+        m.addSeparator()
+        self._act(m, "Music에서 선택한 곡 추가", self.music_add_selection, "Ctrl+Shift+I")
+        m.addSeparator()
+        self._act(m, "Music 권한 확인", self.music_check)
+        self._act(m, "Music 권한 설정 열기…", music.open_privacy_settings)
 
     def _build_toolbar(self):
         tb = QToolBar("도구 막대")
@@ -353,18 +374,18 @@ class MainWindow(QMainWindow):
             tb.addWidget(b)
             return b
 
-        self.tb_save = button("저장", self.save, "바꾼 태그 저장 (⌘S)")
-        self.tb_undo = button("되돌리기", self.undo, "마지막 작업 되돌리기 (⌘Z)")
+        self.tb_save = button("저장", self.save, keys("바꾼 태그 저장 (⌘S)"))
+        self.tb_undo = button("되돌리기", self.undo, keys("마지막 작업 되돌리기 (⌘Z)"))
         tb.addSeparator()
         self.tb_refresh = button("새로고침", self.refresh, "목록의 파일을 다시 읽기 (F5)")
         self.tb_clear = button("목록 지우기", self.clear_list, "목록 비우기 — 파일은 지우지 않습니다")
         tb.addSeparator()
-        self.tb_finder = button("Finder에서 보기", self.reveal, "선택한 파일을 Finder에서 보기 (⇧⌘R)")
+        self.tb_finder = button(REVEAL_LABEL, self.reveal, keys(f"선택한 파일을 {REVEAL_LABEL} (⇧⌘R)"))
         tb.addSeparator()
-        self.tb_up = button("↑ 위로", lambda: self.move_selection(-1), "선택한 곡을 한 칸 위로 (⌥⌘↑)")
-        self.tb_down = button("↓ 아래로", lambda: self.move_selection(1), "선택한 곡을 한 칸 아래로 (⌥⌘↓)")
+        self.tb_up = button("↑ 위로", lambda: self.move_selection(-1), keys("선택한 곡을 한 칸 위로 (⌥⌘↑)"))
+        self.tb_down = button("↓ 아래로", lambda: self.move_selection(1), keys("선택한 곡을 한 칸 아래로 (⌥⌘↓)"))
         self.tb_rename = button("일괄 변경…", self.batch_rename,
-                                "곡명·파일명을 규칙(바꾸기·붙이기·지우기·번호…)으로 한꺼번에 바꾸기 (⌥9) — 선택한 곡, 선택이 없으면 목록 전체")
+                                keys("곡명·파일명을 규칙(바꾸기·붙이기·지우기·번호…)으로 한꺼번에 바꾸기 (⌥9) — 선택한 곡, 선택이 없으면 목록 전체"))
         self.tb_number = button("트랙 번호…", self.number_tracks,
                                 "목록에 보이는 순서대로 트랙 번호 매기기 — 선택한 곡, 선택이 없으면 목록 전체")
         self._update_toolbar()
@@ -375,7 +396,7 @@ class MainWindow(QMainWindow):
         has_files = bool(self.model.files)
         self.tb_save.setEnabled(self.panel.is_dirty())
         self.tb_undo.setEnabled(bool(self.undo_stack))
-        self.tb_undo.setToolTip(f"되돌리기: {self.undo_stack[-1].label} (⌘Z)" if self.undo_stack
+        self.tb_undo.setToolTip(keys(f"되돌리기: {self.undo_stack[-1].label} (⌘Z)") if self.undo_stack
                                 else "되돌릴 작업이 없습니다")
         self.tb_refresh.setEnabled(has_files)
         self.tb_clear.setEnabled(has_files)
@@ -397,7 +418,7 @@ class MainWindow(QMainWindow):
         box.setTextFormat(Qt.RichText)
         box.setText(f"<b style='font-size:15px'>{APP_NAME}</b><br>버전 {shown}")
         box.setInformativeText(
-            "macOS용 음악 태그 편집기<br><br>"
+            ("macOS" if IS_MAC else "Windows") + "용 음악 태그 편집기<br><br>"
             f"<a href='{RELEASES_URL}'>새 버전 · 바뀐 점 보기</a>")
         for label in box.findChildren(QLabel):
             label.setOpenExternalLinks(True)
@@ -431,13 +452,14 @@ class MainWindow(QMainWindow):
             return
         m = QMenu(self)
         m.addAction("재생", self.play)
-        m.addAction("Finder에서 보기", self.reveal)
+        m.addAction(REVEAL_LABEL, self.reveal)
         m.addSeparator()
         m.addAction("확장 태그…", self.extended_tags)
         if len(self.selected_files()) > 1:
             m.addAction("태그 비교…", self.compare_tags)
         m.addAction("앨범아트 찾기…", self.find_artwork)
-        m.addAction("Apple Music에 반영", self.music_refresh)
+        if IS_MAC:
+            m.addAction("Apple Music에 반영", self.music_refresh)
         m.addAction("재생목록 만들기…", self.make_playlist)
         m.addAction("내보내기…", self.export_list)
         m.addSeparator()
@@ -793,7 +815,7 @@ class MainWindow(QMainWindow):
                 pass
         if entry.items:
             self._push_undo(entry)
-            if self.settings.value("music_auto", False, bool):
+            if IS_MAC and self.settings.value("music_auto", False, bool):
                 changed = [i.new_path for i in entry.items]
                 self._music_refresh_paths(changed, modal=False)
         if refresh_panel:
@@ -1400,7 +1422,7 @@ class MainWindow(QMainWindow):
     def reveal(self):
         files = self.selected_files()
         if files:
-            subprocess.run(["open", "-R", files[0].path], check=False)
+            reveal(files[0].path)
 
     # ------------------------------------------------------------ 드래그 앤 드롭
     def _drop_paths(self, e):
@@ -1499,6 +1521,13 @@ def main(argv=None):
     argv = argv if argv is not None else sys.argv
     app = App(argv)
     app.setApplicationName(APP_NAME)
+    if IS_WIN:
+        # 한글·일본어가 섞인 곡명이 고르게 보이도록
+        from PySide6.QtGui import QFont
+        font = QFont("Malgun Gothic", 9)
+        font.setFamilies(["Malgun Gothic", "Yu Gothic UI", "Segoe UI"])
+        app.setFont(font)
+        app.setWindowIcon(_app_icon())
     w = MainWindow()
     app.window = w
     w.show()

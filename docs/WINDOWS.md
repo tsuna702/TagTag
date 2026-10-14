@@ -40,6 +40,12 @@ py -3 -m venv .venv
 | 메뉴 | macOS 는 About·종료가 앱 메뉴로 옮겨짐 (`AboutRole`, `QuitRole`) | Windows 는 그대로 파일 메뉴 / 도움말 메뉴에 둔다 |
 | 폰트 | 시스템 기본 | 한글·일본어가 섞여 보이므로 `Malgun Gothic` / `Yu Gothic UI` 확인 |
 
+**진행 (2026-10-14, Windows PC):** 위 표를 거의 다 했다. 운영체제별 도우미는 `localtag/osutil.py`
+(`IS_MAC`·`IS_WIN`, `reveal`, `open_folder`, `keys()` — ⌘ 기호를 Ctrl 표기로). 표에 없던 것도 고쳤다:
+Windows 에는 `os.pread`/`os.pwrite` 가 없고, `os.open` 은 `O_BINARY` 없이 텍스트 모드로 열며, 폴더 fsync 가 안 된다
+(`safewrite.py`). 목록에서 제거는 Windows 에서 Delete 키. `make_icon.py` 가 `LocalTag.ico` 도 만든다.
+남은 것: `filetrack.py` 를 실제 옮긴 파일로 확인, `_version.py` 는 2단계 빌드에서 만든다. 맥에서 smoke PASS 확인.
+
 **끝났는지 확인:** `tests\smoke.py` 가 Windows 에서 PASS. 맥에서도 PASS 여야 한다 (맥 쪽은 사용자가 맥에서 확인하거나 다음에 맥 세션에서).
 
 ## 2단계: 빌드

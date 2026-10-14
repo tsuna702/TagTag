@@ -13,7 +13,7 @@ MEDIA_DIRS = ("Media", "Media.localized", "Music Media", "Music Media.localized"
 
 def _media_root(path):
     for name in MEDIA_DIRS:
-        i = path.find("/" + name + "/")
+        i = path.replace(os.sep, "/").find("/" + name + "/")  # Windows 는 '\' 구분 (길이는 같다)
         if i >= 0:
             return path[:i + len(name) + 1]
     return None

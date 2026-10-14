@@ -72,4 +72,25 @@ check(all("(테스트)" in n for n in after), f"일괄 변경 파일명 {after}"
 w.undo()
 app.processEvents()
 check(sorted(os.listdir(os.path.join(d, "아이유 - 꽃갈피"))) == before, "파일명 되돌리기")
+
+# 운영체제별 부분
+from localtag import osutil, safewrite  # noqa: E402
+
+shown = osutil.keys("위로 (⌥⌘↑) · 보기 (⇧⌘R) · (⌥9)")
+expect = "위로 (⌥⌘↑) · 보기 (⇧⌘R) · (⌥9)" if osutil.IS_MAC else "위로 (Ctrl+Alt+↑) · 보기 (Ctrl+Shift+R) · (Alt+9)"
+check(shown == expect, f"단축키 표기 {shown}")
+
+# 원본에 달라진 부분만 다시 쓰기 — 줄 끝 바이트(\r\n)가 바뀌지 않아야 한다 (Windows 텍스트 모드 방지)
+src, dst = os.path.join(d, "wb-src.bin"), os.path.join(d, "wb-dst.bin")
+data = bytes(range(256)) * 9000 + b"\r\n\n\r"
+with open(dst, "wb") as fp:
+    fp.write(data)
+with open(src, "wb") as fp:
+    fp.write(b"TAG" + data[3:-1])  # 앞은 바뀌고 끝은 한 바이트 짧게
+safewrite.write_back(src, dst)
+with open(dst, "rb") as fp:
+    check(fp.read() == b"TAG" + data[3:-1], "달라진 부분만 다시 쓰기")
+copy = os.path.join(d, "wb-copy.bin")
+safewrite.copy_preserving(dst, copy)
+check(os.path.getmtime(copy) == os.path.getmtime(dst), "복사할 때 수정 시각 유지")
 finish()

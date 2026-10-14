@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QTextBrowser, QVBoxLayout, QWidget,
 )
 
+from .osutil import keys
 from .plan import Plan
 from .rowdrag import RowDragger, move_to
 from .script import HELP_HTML, Context, Pattern, ScriptError, evaluate, split_values
@@ -624,7 +625,7 @@ class AutoNumber(ConverterDialog):
         row = QHBoxLayout()
         for text, delta, key in (("↑ 위로", -1, "Ctrl+Alt+Up"), ("↓ 아래로", 1, "Ctrl+Alt+Down")):
             b = QPushButton(text)
-            b.setToolTip(f"아래 표에서 고른 곡을 한 칸 {'위' if delta < 0 else '아래'}로 ({'⌥⌘↑' if delta < 0 else '⌥⌘↓'})")
+            b.setToolTip(keys(f"아래 표에서 고른 곡을 한 칸 {'위' if delta < 0 else '아래'}로 ({'⌥⌘↑' if delta < 0 else '⌥⌘↓'})"))
             b.setShortcut(QKeySequence(key))
             b.setAutoDefault(False)
             b.clicked.connect(lambda _=False, d=delta: self.move(d))
