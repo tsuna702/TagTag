@@ -68,6 +68,7 @@ class MainWindow(QMainWindow):
         self.backups = BackupStore(os.path.join(data_dir, "Backups"))
         self.backup_enabled = self.settings.value("backup_enabled", True, bool)
         QTimer.singleShot(0, self._prune_backups)  # 오래된 백업 정리는 창이 뜬 뒤에
+        QTimer.singleShot(300, self._preload)
 
         # ---- 파일 목록
         self.model = FileModel(self)
@@ -160,6 +161,11 @@ class MainWindow(QMainWindow):
         else:
             self.resize(1280, 760)
         self._update_status()
+
+    def _preload(self):
+        """창이 뜬 직후 나머지 창 모듈을 미리 불러 둔다. 앱이 켜져 있는 동안 앱 파일이 새 버전으로
+        바뀌어도(새로 빌드) 나중에 창을 열 때 다른 버전의 모듈을 읽지 않게 한다."""
+        from . import artworkdialog, backupdialog, export, exttags  # noqa: F401
 
     def _prune_backups(self):
         try:
