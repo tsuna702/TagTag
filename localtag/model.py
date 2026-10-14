@@ -136,9 +136,24 @@ class FileModel(QAbstractTableModel):
     def _resort(self):
         if self.sort_column < 0 or len(self.files) < 2:
             return
-        new = self._sorted(self.files)
+        self._reorder(self._sorted(self.files))
+
+    def move(self, files, delta: int) -> bool:
+        """files 를 한 칸 위(-1)·아래(+1)로 옮긴다. 정렬은 '직접 정한 순서'가 된다. 옮겼으면 True."""
+        self.sort_column = -1
+        ids = {id(f) for f in files}
+        order = list(self.files)
+        rows = range(len(order)) if delta < 0 else range(len(order) - 1, -1, -1)
+        for i in rows:
+            j = i + delta
+            # 맨 끝에 닿은 곡이 있으면 그 곡을 넘어가지 않는다 (선택한 곡끼리의 순서는 그대로)
+            if id(order[i]) in ids and 0 <= j < len(order) and id(order[j]) not in ids:
+                order[i], order[j] = order[j], order[i]
+        return self._reorder(order)
+
+    def _reorder(self, new) -> bool:
         if all(a is b for a, b in zip(new, self.files)):
-            return
+            return False
         self.layoutAboutToBeChanged.emit()
         old_list = self.persistentIndexList()
         row_of = {id(f): i for i, f in enumerate(new)}
@@ -147,6 +162,7 @@ class FileModel(QAbstractTableModel):
         self._rows = None
         self.changePersistentIndexList(old_list, new_list)
         self.layoutChanged.emit()
+        return True
 
     # ---- 조작
     def set_files(self, files):

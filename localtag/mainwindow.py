@@ -236,6 +236,10 @@ class MainWindow(QMainWindow):
         self._act(m, "모두 선택", self.table.selectAll, QKeySequence.SelectAll)
         self._act(m, "선택 반전", self.invert_selection, "Ctrl+I")
         m.addSeparator()
+        self._act(m, "위로 이동", lambda: self.move_selection(-1), "Ctrl+Alt+Up")
+        self._act(m, "아래로 이동", lambda: self.move_selection(1), "Ctrl+Alt+Down")
+        self._act(m, "목록 순서대로 트랙 번호…", self.number_tracks)
+        m.addSeparator()
         for a in (self._act(m, "목록에서 제거", self.remove_from_list, "Backspace"),
                   self._act(m, "태그 제거…", self.remove_tags, "Ctrl+Shift+Backspace")):
             # 태그 입력 중에 Backspace가 가로채이지 않도록 목록에서만 동작
@@ -321,6 +325,11 @@ class MainWindow(QMainWindow):
         self.tb_clear = button("목록 지우기", self.clear_list, "목록 비우기 — 파일은 지우지 않습니다")
         tb.addSeparator()
         self.tb_finder = button("Finder에서 보기", self.reveal, "선택한 파일을 Finder에서 보기 (⇧⌘R)")
+        tb.addSeparator()
+        self.tb_up = button("↑ 위로", lambda: self.move_selection(-1), "선택한 곡을 한 칸 위로 (⌥⌘↑)")
+        self.tb_down = button("↓ 아래로", lambda: self.move_selection(1), "선택한 곡을 한 칸 아래로 (⌥⌘↓)")
+        self.tb_number = button("트랙 번호…", self.number_tracks,
+                                "목록에 보이는 순서대로 트랙 번호 매기기 — 선택한 곡, 선택이 없으면 목록 전체")
         self._update_toolbar()
 
     def _update_toolbar(self):
@@ -333,7 +342,11 @@ class MainWindow(QMainWindow):
                                 else "되돌릴 작업이 없습니다")
         self.tb_refresh.setEnabled(has_files)
         self.tb_clear.setEnabled(has_files)
-        self.tb_finder.setEnabled(self.table.selectionModel().hasSelection())
+        has_sel = self.table.selectionModel().hasSelection()
+        self.tb_finder.setEnabled(has_sel)
+        self.tb_up.setEnabled(has_sel)
+        self.tb_down.setEnabled(has_sel)
+        self.tb_number.setEnabled(has_files)
 
     def show_about(self):
         ver = app_version()
@@ -444,6 +457,31 @@ class MainWindow(QMainWindow):
         n = self.proxy.rowCount()
         if n:
             self._select_rows(range(n), QItemSelectionModel.Toggle)
+
+    def move_selection(self, delta):
+        """선택한 곡을 목록에서 한 칸 위·아래로 옮긴다 (트랙 번호를 목록 순서대로 매기기 전에)."""
+        files = self.selected_files()
+        if not files:
+            return
+        if self.proxy.filter_fn is not None:
+            self.statusBar().showMessage("필터를 지운 뒤 순서를 바꿔 주세요.", 5000)
+            return
+        if self.model.sort_column >= 0:
+            # 열 정렬을 풀고 지금 보이는 순서에서 직접 정한 순서로 바꾼다
+            self.table.horizontalHeader().setSortIndicator(-1, Qt.AscendingOrder)
+        if self.model.move(files, delta):
+            self.table.scrollTo(self.proxy.index(self.model.row_of(files[0 if delta < 0 else -1]), 0))
+            self.statusBar().showMessage("목록 순서를 바꿨습니다. '트랙 번호…'로 이 순서대로 번호를 매길 수 있습니다.", 5000)
+
+    def number_tracks(self):
+        """목록에 보이는 순서대로 트랙 번호 (선택한 곡, 선택이 없으면 보이는 곡 전체)."""
+        self._confirm_pending()
+        files = self.selected_files() or self.visible_files()
+        if not files:
+            return
+        dlg = AutoNumber(self, files, self.settings)
+        if dlg.exec():
+            self.apply_plans(dlg.result_plans(), "자동 번호 매기기")
 
     def _confirm_pending(self) -> bool:
         """패널에 저장하지 않은 변경이 있으면 물어본다. False면 취소."""
