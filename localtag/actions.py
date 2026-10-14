@@ -35,7 +35,10 @@ ACTION_TYPES = {
     "export_cover": "커버를 파일로 내보내기",
     "remove_cover": "커버 제거",
     "resize_cover": "커버 크기 조정",
+    "youtube": "YouTube 제목 정리",
 }
+
+YT_ORDERS = {"artist_title": "아티스트 - 제목", "title_artist": "제목 - 아티스트"}
 
 CASE_MODES = {
     "lower": "모두 소문자",
@@ -58,6 +61,7 @@ DEFAULTS = {
     "export_cover": {"filename": "cover", "overwrite": False},
     "remove_cover": {},
     "resize_cover": {"size": 500, "fit": "crop", "trim": False},
+    "youtube": {"split": True, "order": "artist_title", "keep_cover": True, "overwrite_artist": True},
 }
 
 
@@ -91,6 +95,11 @@ def describe(a: dict) -> str:
         return f"{name}: {a['source']} → {a['pattern']}"
     if t in ("import_cover", "export_cover"):
         return f"{name}: {a['filename']}"
+    if t == "youtube":
+        opts = [f"'{YT_ORDERS.get(a.get('order'), '')}' 나누기"] if a.get("split", True) else []
+        if not a.get("keep_cover", True):
+            opts.append("커버 표시도 지움")
+        return f"{name}" + (": " + ", ".join(opts) if opts else "")
     if t == "resize_cover":
         from .artwork import FITS
         return f"{name}: {a.get('size')}×{a.get('size')} {FITS.get(a.get('fit'), '')}"
@@ -241,6 +250,18 @@ def apply_action(w: Work, a: dict, index: int, total: int):
     elif t == "remove_cover":
         if w.pictures:
             w.pictures, w.pics_changed = [], True
+    elif t == "youtube":
+        from .ytclean import clean
+        # 제목이 없으면 파일명에서 (JDownloader로 받은 파일은 태그가 비어 있기도 하다)
+        src = w.view().get("title") or w.view().stem
+        title, artist = clean(src, w.view().get("artist"), split=a.get("split", True),
+                              keep_cover=a.get("keep_cover", True),
+                              overwrite_artist=a.get("overwrite_artist", True),
+                              order=a.get("order", "artist_title"))
+        if title:
+            w.tags["title"] = [title]
+        if artist:
+            w.tags["artist"] = [artist]
     elif t == "resize_cover":
         from .artwork import ArtworkError, process
         idx = next((i for i, p in enumerate(w.pictures) if p.type == 3), 0 if w.pictures else -1)

@@ -26,38 +26,50 @@ SAME_BRUSH = QBrush(QColor(140, 140, 140))
 # ------------------------------------------------------------------ 파일명 만들기
 
 _WIN_INVALID = '*?"<>|'
+_FULLWIDTH = {"/": "／", "\\": "＼", ":": "：", "*": "＊", "?": "？", '"': "＂", "<": "＜", ">": "＞", "|": "｜"}
+# 파일명에 쓸 수 없는 문자를 어떻게 바꿀지
+CHAR_MODES = {
+    "underscore": "밑줄(_)로 바꾸기 — AC/DC → AC_DC",
+    "fullwidth": "비슷한 전각 문자로 바꾸기 — AC/DC → AC／DC",
+    "remove": "지우기 — AC/DC → ACDC",
+}
 
 
-def make_value_filter(win_compat: bool):
-    """필드 값 안의 경로 구분자 등은 폴더가 되지 않도록 바꾼다 (AC/DC → AC_DC)."""
+def _swap(c: str, mode: str) -> str:
+    if mode == "fullwidth":
+        return _FULLWIDTH.get(c, "_")
+    return "" if mode == "remove" else "_"
+
+
+def make_value_filter(win_compat: bool, mode: str = "underscore"):
+    """필드 값 안의 경로 구분자 등은 폴더가 되지 않도록 바꾼다 (AC/DC → AC_DC · AC／DC · ACDC)."""
+    bad = "/\\:" + (_WIN_INVALID if win_compat else "")
+
     def f(s: str) -> str:
-        s = s.replace("/", "_").replace("\\", "_").replace(":", "_")
-        if win_compat:
-            s = "".join("_" if c in _WIN_INVALID else c for c in s)
-        return s
+        return "".join(_swap(c, mode) if c in bad else c for c in s)
     return f
 
 
-def _clean_component(c: str, win_compat: bool) -> str:
+def _clean_component(c: str, win_compat: bool, mode: str = "underscore") -> str:
     c = "".join(ch for ch in c if ch >= " ")  # 제어 문자 제거
-    c = c.replace(":", "_")
+    bad = ":" + (_WIN_INVALID if win_compat else "")
+    c = "".join(_swap(ch, mode) if ch in bad else ch for ch in c)
     if win_compat:
-        c = "".join("_" if ch in _WIN_INVALID else ch for ch in c)
         c = c.rstrip(". ")
-    c = c.strip()
+    c = re.sub(r"\s{2,}", " ", c).strip() if mode == "remove" else c.strip()
     # 파일 시스템 이름 길이 제한 (255바이트)
     while len(c.encode("utf-8")) > 250:
         c = c[:-1]
     return c
 
 
-def build_target_path(af: AudioFile, result: str, win_compat: bool) -> str:
+def build_target_path(af: AudioFile, result: str, win_compat: bool, mode: str = "underscore") -> str:
     """포맷 결과로 새 전체 경로를 만든다. '/' 나 '\\' 는 폴더 구분."""
     absolute = result.startswith("/")
     parts = [p for p in re.split(r"[\\/]", result)]
     if absolute:
         parts = parts[1:]
-    cleaned = [_clean_component(nfc(p), win_compat) for p in parts]
+    cleaned = [_clean_component(nfc(p), win_compat, mode) for p in parts]
     if not cleaned or any(c in ("", ".", "..") for c in cleaned):
         raise ValueError("빈 파일명 또는 폴더 이름이 생깁니다")
     base = "/" if absolute else os.path.dirname(af.path)
@@ -216,6 +228,16 @@ class ConverterDialog(QDialog):
         self.form.addRow("", cb)
         return cb
 
+    def add_choice(self, label, key, choices: dict, default):
+        cb = QComboBox()
+        for k, text in choices.items():
+            cb.addItem(text, k)
+        cb.setCurrentIndex(max(0, cb.findData(self.settings.value(f"conv/{key}", default, str))))
+        cb.currentIndexChanged.connect(lambda _: self.settings.setValue(f"conv/{key}", cb.currentData()))
+        cb.currentIndexChanged.connect(self.schedule)
+        self.form.addRow(label, cb)
+        return cb
+
     def schedule(self, *_):
         self.timer.start()
 
@@ -292,6 +314,7 @@ class TagToFilename(ConverterDialog):
             "$num(%track%,2). %artist% - %title%",
             "[%disc%-]$num(%track%,2) %title%",
         ])
+        self.chars = self.add_choice("쓸 수 없는 문자 (/ \\ :):", "char_mode", CHAR_MODES, "underscore")
         self.win = self.add_check("Windows에서 쓸 수 없는 문자(* ? \" < > |)도 바꾸기", "win_compat", False)
 
     def headers(self):
@@ -301,13 +324,14 @@ class TagToFilename(ConverterDialog):
         fmt = self.fmt.currentText()
         if not fmt.strip():
             raise ValueError("포맷 문자열을 입력하세요")
-        vf = make_value_filter(self.win.isChecked())
+        mode = self.chars.currentData()
+        vf = make_value_filter(self.win.isChecked(), mode)
         plans = []
         for i, f in enumerate(self.files):
             p = Plan(f, cells=[f.filename])
             try:
                 result = evaluate(fmt, Context(f, i, len(self.files), value_filter=vf))
-                new = build_target_path(f, result, self.win.isChecked())
+                new = build_target_path(f, result, self.win.isChecked(), mode)
                 p.cells.append(display_path(f, new))
                 if new == f.path:
                     p.unchanged = True
@@ -382,6 +406,7 @@ class FilenameToFilename(ConverterDialog):
     def build(self):
         self.src = self.add_format("기존 파일명 패턴:", "file2file_src", ["%1 - %2", "%1 %2"])
         self.dst = self.add_format("새 파일명 패턴:", "file2file_dst", ["%2 - %1", "%2"])
+        self.chars = self.add_choice("쓸 수 없는 문자 (/ \\ :):", "char_mode", CHAR_MODES, "underscore")
         self.win = self.add_check("Windows에서 쓸 수 없는 문자(* ? \" < > |)도 바꾸기", "win_compat", False)
 
     def headers(self):
@@ -395,7 +420,8 @@ class FilenameToFilename(ConverterDialog):
         if not dst.strip():
             raise ValueError("새 파일명 패턴을 입력하세요")
         pat = Pattern(src, allow_any_name=True)
-        vf = make_value_filter(self.win.isChecked())
+        mode = self.chars.currentData()
+        vf = make_value_filter(self.win.isChecked(), mode)
         plans = []
         for i, f in enumerate(self.files):
             p = Plan(f, cells=[f.filename])
@@ -406,7 +432,7 @@ class FilenameToFilename(ConverterDialog):
             else:
                 try:
                     result = evaluate(dst, Context(f, i, len(self.files), overrides=m, value_filter=vf))
-                    new = build_target_path(f, result, self.win.isChecked())
+                    new = build_target_path(f, result, self.win.isChecked(), mode)
                     p.cells.append(display_path(f, new))
                     if new == f.path:
                         p.unchanged = True
@@ -564,6 +590,13 @@ class TextToTag(ConverterDialog):
 
 # ------------------------------------------------------------------ 자동 번호 매기기
 
+TOTAL_MODES = {
+    "keep": "원래 있던 총수 그대로 (예: 03/12 의 12)",
+    "count": "묶음의 곡 수로 새로 넣기 (예: 03/12)",
+    "none": "넣지 않기 (총수를 지움)",
+}
+
+
 class AutoNumber(ConverterDialog):
     title = "자동 번호 매기기"
     description = "목록에 보이는 순서대로 트랙 번호를 매깁니다."
@@ -583,7 +616,9 @@ class AutoNumber(ConverterDialog):
         self.moved = False
         self.start = self._spin("시작 번호:", "num_start", 0, 9999, 1)
         self.digits = self._spin("자릿수 (앞을 0으로 채움):", "num_digits", 1, 4, 2)
-        self.total = self.add_check("전체 곡 수도 넣기 (예: 03/12)", "num_total", False)
+        old = self.settings.value("conv/num_total")  # 예전 체크 상자 (켜져 있었으면 '곡 수로')
+        default = "count" if str(old).lower() in ("true", "1") else "keep"
+        self.total = self.add_choice("전체 곡 수:", "num_total_mode", TOTAL_MODES, default)
         self.per_folder = self.add_check("폴더가 바뀌면 다시 시작", "num_per_folder", True)
         self.disc = self.add_check("폴더마다 디스크 번호도 1, 2, 3… 으로 매기기", "num_disc", False)
         row = QHBoxLayout()
@@ -654,7 +689,14 @@ class AutoNumber(ConverterDialog):
             n_total = len(files)
             for i, f in enumerate(files):
                 num = str(self.start.value() + i).zfill(digits)
-                track = f"{num}/{str(n_total).zfill(digits)}" if self.total.isChecked() else num
+                mode = self.total.currentData()
+                if mode == "count":
+                    track = f"{num}/{str(n_total).zfill(digits)}"
+                elif mode == "keep" and "/" in f.get("track"):
+                    old_total = f.get("track").split("/", 1)[1].strip()
+                    track = f"{num}/{old_total}" if old_total else num
+                else:
+                    track = num
                 changes = {}
                 if f.tags.get("track") != [track]:
                     changes["track"] = [track]

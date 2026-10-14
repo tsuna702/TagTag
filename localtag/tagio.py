@@ -656,6 +656,42 @@ def _has_id3v1(path: str) -> bool:
         return False
 
 
+LOSSLESS = {"FLAC", "ALAC", "WAV", "AIFF", "APE", "WAVPACK", "TTA", "DSD", "WMA LOSSLESS"}
+
+
+def _codec_name(mf, kind) -> str:
+    """mutagen 객체 → 사람이 읽는 코덱 이름 (확장자가 아니라 실제 내용)."""
+    info = mf.info
+    if kind == "mp4":
+        c = (getattr(info, "codec", "") or "").lower()
+        if c.startswith("alac"):
+            return "ALAC"
+        if c.startswith("mp4a") or c.startswith("aac"):
+            return "AAC"
+        return c.upper() or "MP4"
+    if isinstance(mf, MP3):
+        return "MP3"
+    if isinstance(mf, WAVE):
+        return "WAV"
+    if isinstance(mf, AIFF):
+        return "AIFF"
+    if isinstance(mf, DSF):
+        return "DSD"
+    if isinstance(mf, TrueAudio):
+        return "TTA"
+    if kind == "flac":
+        return "FLAC"
+    name = type(mf).__name__.lower()
+    for key, label in (("opus", "Opus"), ("vorbis", "Vorbis"), ("oggflac", "FLAC"), ("speex", "Speex"),
+                       ("monkey", "APE"), ("wavpack", "WAVPACK"), ("musepack", "MPC"), ("optimfrog", "OFR")):
+        if key in name:
+            return label
+    if kind == "asf":
+        codec = (getattr(info, "codec_name", "") or "")
+        return "WMA LOSSLESS" if "lossless" in codec.lower() else "WMA"
+    return os.path.splitext(mf.filename or "")[1].lstrip(".").upper()
+
+
 def _kind(mf) -> str:
     if isinstance(mf, ID3_CLASSES):
         return "id3"
@@ -689,6 +725,8 @@ class AudioFile:
     bitrate: int = 0
     sample_rate: int = 0
     channels: int = 0
+    codec: str = ""        # 실제 코덱 (AAC, ALAC, FLAC, MP3 …)
+    bits: int = 0          # 비트 깊이 (무손실 형식만)
     tag_type: str = ""
     size: int = 0
     mtime: float = 0.0
@@ -711,6 +749,14 @@ class AudioFile:
     @property
     def ext(self) -> str:
         return os.path.splitext(self.path)[1].lower()
+
+    @property
+    def lossless(self) -> bool:
+        return (self.codec or self.ext.lstrip(".").upper()) in LOSSLESS
+
+    def quality_key(self):
+        """음질 비교용 (클수록 좋음): 무손실 → 비트레이트 → 샘플레이트 → 비트 깊이."""
+        return (self.lossless, self.bitrate if not self.lossless else 0, self.sample_rate, self.bits, self.bitrate)
 
     def get(self, name: str) -> str:
         return SEP.join(self.tags.get(name, []))
@@ -751,6 +797,9 @@ class AudioFile:
         af.channels = int(getattr(info, "channels", 0) or 0)
         if not af.bitrate and af.length:
             af.bitrate = int(af.size * 8 / af.length)
+        af.codec = _codec_name(mf, kind)
+        if af.codec in LOSSLESS:
+            af.bits = int(getattr(info, "bits_per_sample", 0) or 0)
 
         tags = mf.tags
         if kind == "id3":

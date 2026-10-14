@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
 )
 
 from .actions import (
-    ACTION_TYPES, ALL, CASE_MODES, COVER, FILENAME, describe, field_label, new_action,
+    ACTION_TYPES, ALL, CASE_MODES, COVER, FILENAME, YT_ORDERS, describe, field_label, new_action,
 )
 from .converters import ConverterDialog, HelpDialog
 from .tagio import FIELDS, field_key
@@ -60,6 +60,18 @@ FORMS = {
     "remove_cover": [],
     "resize_cover": [("size", "크기", "choice_size"), ("fit", "맞춤", "choice_fit"),
                      ("trim", "가장자리 검은 띠 없애기", "bool")],
+    "youtube": [("split", "제목에서 아티스트를 떼어 아티스트 칸으로", "bool"),
+                ("order", "제목 모양", "choice_order"),
+                ("overwrite_artist", "이미 있는 아티스트(채널 이름 등)도 바꾸기", "bool"),
+                ("keep_cover", "'歌ってみた'·'Cover' 같은 커버곡 표시는 남기기", "bool")],
+}
+
+
+# 액션 편집 창 맨 위에 보여 줄 설명
+NOTES = {
+    "youtube": ("제목(없으면 파일명)에서 【MV】, (Official Music Video), [4K], (128kbit_AAC) 같은 꼬리말을 떼고, "
+                "'아티스트 - 제목'이면 아티스트 칸으로 옮깁니다. '曲名 / 歌手' 모양도 알아봅니다. "
+                "채널 이름(… - Topic, …VEVO)은 아티스트 이름으로 다듬습니다. 적용 전에 미리 보여 줍니다."),
 }
 
 
@@ -67,6 +79,8 @@ def _choices(kind):
     from .artwork import FITS
     if kind == "choice_size":
         return {s: f"{s} × {s}" for s in (500, 600, 1000)}
+    if kind == "choice_order":
+        return dict(YT_ORDERS)
     return dict(FITS)
 
 
@@ -77,6 +91,11 @@ class ActionEditDialog(QDialog):
         self.setWindowTitle("액션: " + ACTION_TYPES[action["type"]])
         self.setMinimumWidth(520)
         v = QVBoxLayout(self)
+        if action["type"] in NOTES:
+            note = QLabel(NOTES[action["type"]])
+            note.setWordWrap(True)
+            note.setStyleSheet("color: gray;")
+            v.addWidget(note)
         form = QFormLayout()
         form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         v.addLayout(form)

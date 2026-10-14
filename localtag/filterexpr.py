@@ -5,6 +5,8 @@
   title MATCHES "^\\d+"                  정규식
   year GREATER 2010 / LESS / EQUAL       숫자 비교
   genre MISSING / comment PRESENT        값이 없음 / 있음
+  cover MISSING · lossless PRESENT       커버 없음 · 무손실
+  bitrate LESS 192 · codec IS AAC        음질 (samplerate, bits, quality 도 씀)
   NOT, AND, OR, ( )                      조합
   "%artist% - %title%" HAS 사랑          포맷 문자열로 비교
   $len(%title%) GREATER 30
@@ -20,7 +22,9 @@ BINARY = {"IS", "HAS", "MATCHES", "GREATER", "LESS", "EQUAL"}
 UNARY = {"PRESENT", "MISSING"}
 KEYWORDS = BINARY | UNARY | {"AND", "OR", "NOT"}
 ALIASES = {"filename": "%_filename_ext%", "path": "%_path%", "folder": "%_directory%",
-           "ext": "%_extension%", "length": "%_length_seconds%", "bitrate": "%_bitrate%"}
+           "ext": "%_extension%", "length": "%_length_seconds%", "bitrate": "%_bitrate%",
+           "samplerate": "%_samplerate%", "bits": "%_bitspersample%", "codec": "%_codec%",
+           "lossless": "%_lossless%", "quality": "%_quality%", "cover": "%_has_cover%"}
 
 
 class FilterError(Exception):

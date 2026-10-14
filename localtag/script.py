@@ -172,7 +172,7 @@ class Context:
             return str(self.total)
         if af is None:
             return ""
-        from .model import fmt_length  # 순환 import 방지
+        from .model import fmt_length, quality_label  # 순환 import 방지
         table = {
             "_filename": lambda: af.stem,
             "_filename_ext": lambda: af.filename,
@@ -187,7 +187,11 @@ class Context:
             "_bitrate": lambda: str(af.bitrate // 1000) if af.bitrate else "",
             "_samplerate": lambda: str(af.sample_rate) if af.sample_rate else "",
             "_channels": lambda: str(af.channels) if af.channels else "",
-            "_codec": lambda: af.ext.lstrip(".").upper(),
+            "_codec": lambda: af.codec or af.ext.lstrip(".").upper(),
+            "_bitspersample": lambda: str(af.bits) if af.bits else "",
+            "_lossless": lambda: "1" if af.lossless else "",
+            "_quality": lambda: quality_label(af),
+            "_has_cover": lambda: "1" if af.pictures else "",
             "_tag": lambda: af.tag_type,
             "_file_size": lambda: str(af.size),
             "_covers": lambda: str(len(af.pictures)),
@@ -528,7 +532,7 @@ HELP_HTML = """
 <p><b>파일 정보</b>: <code>%_filename%</code> (확장자 제외) <code>%_filename_ext%</code> <code>%_extension%</code>
 <code>%_path%</code> <code>%_folderpath%</code> <code>%_directory%</code> (폴더 이름) <code>%_parent_directory%</code>
 <code>%_length%</code> <code>%_length_seconds%</code> <code>%_bitrate%</code> <code>%_samplerate%</code>
-<code>%_channels%</code> <code>%_codec%</code> <code>%_tag%</code> <code>%_file_size%</code> <code>%_covers%</code>
+<code>%_channels%</code> <code>%_codec%</code> <code>%_bitspersample%</code> <code>%_lossless%</code> <code>%_quality%</code> <code>%_has_cover%</code> <code>%_tag%</code> <code>%_file_size%</code> <code>%_covers%</code>
 <code>%_counter%</code> (1부터 번호) <code>%_total%</code></p>
 <p>파일명→태그 / 텍스트→태그 패턴에서는 <code>%dummy%</code> 로 필요 없는 부분을 건너뜁니다.</p>
 

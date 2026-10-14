@@ -9,8 +9,8 @@ from PySide6.QtCore import QEvent, QItemSelection, QItemSelectionModel, QSetting
 from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QFileDialog, QHeaderView, QLabel, QLineEdit, QMainWindow,
-    QMenu, QMessageBox, QProgressDialog, QPushButton, QScrollArea, QSplitter, QTableView, QToolBar,
-    QVBoxLayout, QWidget,
+    QHBoxLayout, QMenu, QMessageBox, QProgressDialog, QPushButton, QScrollArea, QSplitter, QTableView,
+    QToolBar, QToolButton, QVBoxLayout, QWidget,
 )
 
 from .actiondialogs import ActionEditDialog, ActionsDialog, PlansPreview, choose_action_type
@@ -115,6 +115,11 @@ class MainWindow(QMainWindow):
         state = self.settings.value("header_state")
         if state is not None:
             hh.restoreState(state)
+            # 저장한 뒤에 새로 생긴 열은 기본 표시 여부·폭으로 (restoreState 는 모두 보이게 둔다)
+            known = self.settings.value("header_cols", 21, int)
+            for i in range(known, len(COLUMNS)):
+                hh.setSectionHidden(i, not COLUMNS[i][4])
+                hh.resizeSection(i, COLUMN_WIDTHS.get(COLUMNS[i][0], 120))
         else:
             self.table.sortByColumn(COLUMNS.index(next(c for c in COLUMNS if c[0] == "path")), Qt.AscendingOrder)
         # 선택이 한꺼번에 여러 번 바뀌어도(새로 고침 후 다시 선택 등) 패널은 한 번만 갱신한다
@@ -154,7 +159,26 @@ class MainWindow(QMainWindow):
         rv = QVBoxLayout(right)
         rv.setContentsMargins(0, 0, 0, 0)
         rv.setSpacing(4)
-        rv.addWidget(self.filter_edit)
+        frow = QHBoxLayout()
+        frow.setSpacing(4)
+        frow.addWidget(self.filter_edit, 1)
+        quick = QToolButton()
+        quick.setText("빠른 필터")
+        quick.setToolTip("자주 쓰는 조건을 골라 필터에 넣기 (커버 없는 곡, 낮은 음질 …)")
+        quick.setPopupMode(QToolButton.InstantPopup)
+        quick.setFocusPolicy(Qt.NoFocus)
+        qm = QMenu(quick)
+        for label, text in QUICK_FILTERS:
+            if label is None:
+                qm.addSeparator()
+            else:
+                qm.addAction(label, lambda text=text: self.set_filter_text(text))
+        qm.addSeparator()
+        qm.addAction("커버 없는 곡을 모두 골라 커버 짝짓기…", self.match_missing_covers)
+        qm.addAction("필터 지우기", lambda: self.set_filter_text(""))
+        quick.setMenu(qm)
+        frow.addWidget(quick)
+        rv.addLayout(frow)
         rv.addWidget(self.table)
 
         self.splitter = QSplitter(Qt.Horizontal)
@@ -185,7 +209,7 @@ class MainWindow(QMainWindow):
     def _preload(self):
         """창이 뜬 직후 나머지 창 모듈을 미리 불러 둔다. 앱이 켜져 있는 동안 앱 파일이 새 버전으로
         바뀌어도(새로 빌드) 나중에 창을 열 때 다른 버전의 모듈을 읽지 않게 한다."""
-        from . import artworkdialog, backupdialog, covermatch, export, extractdialog, exttags  # noqa: F401
+        from . import artworkdialog, backupdialog, compare, covermatch, dupes, export, extractdialog, exttags, ytclean  # noqa: F401
 
     def _prune_backups(self):
         try:
@@ -235,6 +259,8 @@ class MainWindow(QMainWindow):
         self.undo_act.setEnabled(False)
         m.addSeparator()
         self._act(m, "확장 태그…", self.extended_tags, "Ctrl+T")
+        self._act(m, "태그 비교 (고른 곡 나란히)…", self.compare_tags, "Ctrl+Shift+D")
+        self._act(m, "같은 곡 · 여러 버전 찾기…", self.find_duplicates, "Ctrl+Shift+U")
         m.addSeparator()
         self._act(m, "모두 선택", self.table.selectAll, QKeySequence.SelectAll)
         self._act(m, "선택 반전", self.invert_selection, "Ctrl+I")
@@ -285,6 +311,7 @@ class MainWindow(QMainWindow):
         m = mb.addMenu("액션")
         self._act(m, "액션 그룹…", self.run_action_groups, "Alt+6")
         self._act(m, "빠른 액션…", self.quick_action, "Alt+7")
+        self._act(m, "YouTube 제목 정리…", self.youtube_clean, "Alt+8")
         m.addSeparator()
         self._act(m, "자동 번호 매기기…", lambda: self.run_converter(AutoNumber), "Ctrl+K")
 
@@ -402,6 +429,8 @@ class MainWindow(QMainWindow):
         m.addAction("Finder에서 보기", self.reveal)
         m.addSeparator()
         m.addAction("확장 태그…", self.extended_tags)
+        if len(self.selected_files()) > 1:
+            m.addAction("태그 비교…", self.compare_tags)
         m.addAction("앨범아트 찾기…", self.find_artwork)
         m.addAction("Apple Music에 반영", self.music_refresh)
         m.addAction("재생목록 만들기…", self.make_playlist)
@@ -413,6 +442,7 @@ class MainWindow(QMainWindow):
         act = m.addMenu("액션")
         act.addAction("액션 그룹…", self.run_action_groups)
         act.addAction("빠른 액션…", self.quick_action)
+        act.addAction("YouTube 제목 정리…", self.youtube_clean)
         act.addAction("자동 번호 매기기…", lambda: self.run_converter(AutoNumber))
         m.addSeparator()
         m.addAction("목록에서 제거", self.remove_from_list)
@@ -872,12 +902,13 @@ class MainWindow(QMainWindow):
             label, actions = dlg.selected_actions()
             self._run_actions_with_preview(label, actions, files)
 
-    def quick_action(self):
+    def quick_action(self, kind=None):
         files = self._files_for_command()
         if not files:
             return
-        from PySide6.QtGui import QCursor
-        kind = choose_action_type(self, QCursor.pos())
+        if not kind:
+            from PySide6.QtGui import QCursor
+            kind = choose_action_type(self, QCursor.pos())
         if not kind:
             return
         last = self.settings.value(f"quick/{kind}")
@@ -889,6 +920,68 @@ class MainWindow(QMainWindow):
             a = dlg.result_action()
             self.settings.setValue(f"quick/{kind}", a)
             self._run_actions_with_preview(describe(a), [a], files)
+
+    def youtube_clean(self):
+        """YouTube에서 받은 곡의 제목에서 꼬리말을 떼고 '아티스트 - 제목'을 나눈다 (미리 보기 후 적용)."""
+        self.quick_action("youtube")
+
+    def compare_tags(self):
+        files = self.selected_files()
+        if len(files) < 2:
+            QMessageBox.information(self, APP_NAME, "비교할 곡을 두 개 이상 고르세요.")
+            return
+        from .compare import CompareDialog
+        CompareDialog(self, files).exec()
+
+    def find_duplicates(self):
+        self._confirm_pending()
+        files = list(self.model.files)
+        if len(files) < 2:
+            QMessageBox.information(self, APP_NAME, "곡을 목록에 먼저 불러오세요.")
+            return
+        from .dupes import DuplicatesDialog
+        dlg = DuplicatesDialog(self, files, self.settings)
+        if not dlg.exec():
+            return
+        if dlg.mode == "remove":
+            self.table.selectionModel().clearSelection()
+            self.panel.set_files([])
+            self.model.remove(dlg.picked)
+            self._update_status([])
+            self.statusBar().showMessage(f"{len(dlg.picked)}곡을 목록에서 뺐습니다 (파일은 그대로).", 5000)
+        else:
+            self.select_files(dlg.picked)
+
+    def select_files(self, files):
+        """이 파일들만 목록에서 고른다. 필터에 가려진 곡이 있으면 필터를 지운다."""
+        ids = {id(f) for f in files}
+        rows = [r for r, f in enumerate(self.model.files) if id(f) in ids]
+        if self.proxy.filter_fn is not None:
+            prow = [self.proxy.mapFromSource(self.model.index(r, 0)).row() for r in rows]
+            if any(r < 0 for r in prow):
+                self.set_filter_text("")
+            else:
+                rows = prow
+        self.table.selectionModel().clearSelection()
+        self._select_rows(rows)
+        if rows:
+            self.table.scrollTo(self.proxy.index(min(rows), 0))
+
+    def set_filter_text(self, text):
+        """빠른 필터: 입력칸에 넣고 바로 적용한다."""
+        self.filter_edit.setText(text)
+        self.filter_timer.stop()
+        self.apply_filter()
+
+    def match_missing_covers(self):
+        """커버 없는 곡만 보이게 한 뒤 모두 골라 커버 짝짓기 창을 연다."""
+        self.set_filter_text("cover MISSING")
+        n = self.proxy.rowCount()
+        if not n:
+            QMessageBox.information(self, APP_NAME, "커버 없는 곡이 없습니다.")
+            return
+        self.table.selectAll()
+        self.match_covers()
 
     def remove_tags(self):
         files = self.selected_files()
@@ -1327,8 +1420,23 @@ class MainWindow(QMainWindow):
         self._confirm_pending()
         self.settings.setValue("geometry", self.saveGeometry())
         self.settings.setValue("header_state", self.table.horizontalHeader().saveState())
+        self.settings.setValue("header_cols", len(COLUMNS))
         self.settings.setValue("splitter", self.splitter.saveState())
         super().closeEvent(e)
+
+
+QUICK_FILTERS = [
+    ("커버 없는 곡", "cover MISSING"),
+    ("낮은 음질 (192 kbps 미만, 무손실 빼고)", "bitrate LESS 192 AND lossless MISSING"),
+    ("손실 압축 (AAC · MP3 · Opus …)", "lossless MISSING"),
+    ("무손실 (FLAC · ALAC · WAV …)", "lossless PRESENT"),
+    ("AAC 만", "codec IS AAC"),
+    (None, None),
+    ("제목 없음", "title MISSING"),
+    ("아티스트 없음", "artist MISSING"),
+    ("앨범 없음", "album MISSING"),
+    ("트랙 번호 없음", "track MISSING"),
+]
 
 
 class App(QApplication):

@@ -26,6 +26,16 @@ def fmt_size(n: int) -> str:
     return str(n)
 
 
+def quality_label(f: AudioFile) -> str:
+    """음질 한눈에 보기: 무손실 / 고음질(256kbps 이상) / 보통 / 낮음(192kbps 미만)."""
+    if f.lossless:
+        return "무손실"
+    kbps = f.bitrate // 1000
+    if not kbps:
+        return ""
+    return "고음질" if kbps >= 256 else "보통" if kbps >= 192 else "낮음"
+
+
 def _num_key(s: str):
     m = re.match(r"\s*(\d+)", s)
     return (0, int(m.group(1)), s) if m else (1, 0, s.lower())
@@ -62,15 +72,19 @@ COLUMNS = [
     ("size", "크기", lambda f: fmt_size(f.size), lambda f: f.size, False),
     ("mtime", "수정한 날짜", lambda f: time.strftime("%Y-%m-%d %H:%M", time.localtime(f.mtime)), lambda f: f.mtime, False),
     ("path", "전체 경로", lambda f: f.path, lambda f: f.path.lower(), False),
+    # 아래는 나중에 더한 열 — 저장해 둔 열 배치가 어긋나지 않게 늘 끝에 붙인다
+    ("realcodec", "코덱", lambda f: f.codec, lambda f: f.codec, False),
+    ("bits", "비트 깊이", lambda f: f"{f.bits} bit" if f.bits else "", lambda f: f.bits, False),
+    ("quality", "음질", quality_label, lambda f: f.quality_key(), False),
 ]
 COLUMN_KEYS = [c[0] for c in COLUMNS]
 COLUMN_WIDTHS = {
     "filename": 240, "folder": 200, "title": 200, "artist": 150, "album": 170,
     "albumartist": 150, "year": 55, "track": 50, "disc": 50, "genre": 100,
     "composer": 130, "comment": 160, "cover": 45, "length": 60, "bitrate": 80,
-    "samplerate": 85, "codec": 55, "tagtype": 120, "size": 75, "mtime": 120, "path": 300,
+    "samplerate": 85, "codec": 55, "realcodec": 60, "bits": 65, "quality": 60, "tagtype": 120, "size": 75, "mtime": 120, "path": 300,
 }
-RIGHT_ALIGNED = {"length", "bitrate", "samplerate", "size", "cover"}
+RIGHT_ALIGNED = {"length", "bitrate", "samplerate", "size", "cover", "bits"}
 
 
 DISPLAY_ROLES = (Qt.DisplayRole, Qt.ToolTipRole)
