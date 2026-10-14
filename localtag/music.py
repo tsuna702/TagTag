@@ -231,6 +231,9 @@ def _osascript(script, *args, timeout=60):
 
 
 def ensure_access(launch=False):
+    """Music을 쓸 수 있는지 확인한다. 아직 묻지 않은 'Apple Music 보관함 접근' 권한은 먼저 받는다."""
+    if media_library_status() == "ask":
+        request_media_library()
     if launch:
         subprocess.run(["/usr/bin/open", "-g", "-b", "com.apple.Music"], capture_output=True, timeout=15)
     out = _osascript(PREFLIGHT, timeout=150)
@@ -265,9 +268,48 @@ def automation_status() -> str:
     return {0: "granted", -1743: "denied", -1744: "ask"}.get(status, "unknown")
 
 
-def open_privacy_settings():
-    subprocess.run(["/usr/bin/open",
-                    "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation"], check=False)
+# ---- 'Apple Music 보관함 접근'(시스템 설정의 '미디어 및 Apple Music') 권한
+# Music 제어(자동화)와는 따로 관리되는 권한이다. Music에 반영할 때 Music이 이 권한을 요구해 처음 반영할 때 권한 창이
+# 뜨므로, 앱을 켤 때 미리 상태를 보고 받아 둔다. 공개 API로는 상태를 알 수 없어 macOS의 TCC 프레임워크를 쓰고,
+# 쓸 수 없으면 'unknown' 으로 두고 예전처럼 Music이 필요할 때 묻게 둔다.
+_MEDIA_SERVICE = b"kTCCServiceMediaLibrary"
+
+
+def _tcc_call(name):
+    tcc = ctypes.CDLL("/System/Library/PrivateFrameworks/TCC.framework/TCC")
+    cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+    cf.CFStringCreateWithCString.restype = ctypes.c_void_p
+    cf.CFStringCreateWithCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32]
+    cf.CFRelease.argtypes = [ctypes.c_void_p]
+    fn = getattr(tcc, name)
+    fn.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    fn.restype = ctypes.c_int
+    svc = cf.CFStringCreateWithCString(None, _MEDIA_SERVICE, 0x08000100)  # UTF-8
+    try:
+        return fn(svc, None)
+    finally:
+        cf.CFRelease(svc)
+
+
+def media_library_status() -> str:
+    """권한 창을 띄우지 않고 'Apple Music 보관함 접근' 상태를 본다. 'granted' / 'denied' / 'ask' / 'unknown'"""
+    try:
+        return {0: "granted", 1: "denied", 2: "ask"}.get(_tcc_call("TCCAccessPreflight"), "unknown")
+    except Exception:
+        return "unknown"
+
+
+def request_media_library() -> bool:
+    """macOS 권한 창을 띄워 'Apple Music 보관함 접근'을 받는다. 사용자가 답할 때까지 기다린다 (작업 스레드에서 부를 것)."""
+    try:
+        return bool(_tcc_call("TCCAccessRequest"))
+    except Exception:
+        return False
+
+
+def open_privacy_settings(kind: str = "automation"):
+    pane = "Privacy_Media" if kind == "media" else "Privacy_Automation"
+    subprocess.run(["/usr/bin/open", "x-apple.systempreferences:com.apple.preference.security?" + pane], check=False)
 
 
 def _run_script(script, args, progress, cancelled, idle_limit=240):

@@ -967,33 +967,44 @@ class MainWindow(QMainWindow):
         ver = app_version()
         if self.settings.value("perm/never", False, bool) or self.settings.value("perm/asked_version", "") == ver:
             return
-        status = music.automation_status()
-        if status == "granted":
+        auto = music.automation_status()           # Music 제어 (자동화)
+        media = music.media_library_status()      # Apple Music 보관함 접근 (미디어 및 Apple Music)
+        need_auto, need_media = auto != "granted", media in ("ask", "denied")
+        if not need_auto and not need_media:
             self.settings.setValue("perm/asked_version", ver)
             return
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Information)
         box.setWindowTitle("Apple Music 권한")
-        if status == "denied":
-            box.setText("Music 제어 권한이 꺼져 있습니다.")
-            box.setInformativeText("고친 곡을 Apple Music에 반영하려면 시스템 설정 → 개인정보 보호 및 보안 → "
-                                   "자동화에서 LocalTag 아래의 'Music'을 켜 주세요.")
+        if auto == "denied" or media == "denied":
+            off = []
+            if auto == "denied":
+                off.append("• Music 제어 — 시스템 설정 → 개인정보 보호 및 보안 → 자동화 → LocalTag 아래의 'Music'")
+            if media == "denied":
+                off.append("• Apple Music 보관함 접근 — 시스템 설정 → 개인정보 보호 및 보안 → 미디어 및 Apple Music → LocalTag")
+            box.setText("Apple Music 권한이 꺼져 있습니다.")
+            box.setInformativeText("고친 곡을 Apple Music에 반영하려면 다음을 켜 주세요.\n\n" + "\n".join(off))
             settings_btn = box.addButton("설정 열기", QMessageBox.AcceptRole)
             box.addButton("나중에", QMessageBox.RejectRole)
             never = box.addButton("다시 묻지 않기", QMessageBox.DestructiveRole)
             box.exec()
             if box.clickedButton() is settings_btn:
-                music.open_privacy_settings()
+                music.open_privacy_settings("automation" if auto == "denied" else "media")
                 self.settings.setValue("perm/asked_version", ver)
             elif box.clickedButton() is never:
                 self.settings.setValue("perm/never", True)
             return
-        box.setText("Apple Music과 함께 쓰려면 권한 두 가지가 필요합니다.")
+        items = []
+        if need_media:
+            items.append("• Apple Music 보관함 접근 — Music에서 곡을 찾고 새로 읽게 합니다")
+        if need_auto:
+            items.append("• Music 제어 — 고친 곡을 Music에서 새로 읽게 합니다")
+        box.setText("Apple Music과 함께 쓰려면 권한이 필요합니다.")
         box.setInformativeText(
-            "• Music 제어 — 고친 곡을 Music에서 새로 읽게 합니다\n"
-            "• Apple Music 보관함 접근 — Music에서 곡의 파일 위치를 찾습니다\n\n"
+            "\n".join(items) + "\n\n"
+            "새 버전은 macOS가 다른 앱으로 보기 때문에 버전마다 한 번씩 다시 받아야 합니다. "
             "지금 허용해 두면 작업 도중에 권한 창이 뜨지 않습니다. "
-            "'지금 허용하기'를 누르면 Music이 열리고 macOS 권한 창이 뜹니다. 모두 '허용'을 눌러 주세요.")
+            "'지금 허용하기'를 누르고 뜨는 macOS 권한 창에서 모두 '허용'을 눌러 주세요.")
         allow = box.addButton("지금 허용하기", QMessageBox.AcceptRole)
         box.addButton("나중에", QMessageBox.RejectRole)
         never = box.addButton("다시 묻지 않기", QMessageBox.DestructiveRole)
@@ -1005,15 +1016,31 @@ class MainWindow(QMainWindow):
         if box.clickedButton() is not allow:
             return  # 다음에 켤 때 다시 묻는다
 
-        def done(_):
+        def job(prog, cancelled):
+            if music.media_library_status() == "ask":
+                music.request_media_library()
+            if need_auto:
+                music.ensure_access(launch=True)
+            return music.media_library_status()
+
+        def done(media_now):
             self.settings.setValue("perm/asked_version", ver)
+            if media_now == "denied":
+                box = QMessageBox(QMessageBox.Warning, "Apple Music 권한",
+                                  "Apple Music 보관함 접근을 허용하지 않았습니다.\n"
+                                  "Music에 반영하려면 시스템 설정 → 개인정보 보호 및 보안 → 미디어 및 Apple Music에서 "
+                                  "LocalTag를 켜 주세요.", QMessageBox.Ok, self)
+                b = box.addButton("설정 열기", QMessageBox.ActionRole)
+                box.exec()
+                if box.clickedButton() is b:
+                    music.open_privacy_settings("media")
+                return
             QMessageBox.information(self, "Apple Music 권한", "준비됐습니다. 이제 Music에 바로 반영할 수 있습니다.")
 
         def fail(msg):
             self.settings.setValue("perm/asked_version", ver)
             self._music_error(msg)
-        run_task(self, "Apple Music 권한 확인 · 권한 창이 뜨면 '허용'을 눌러 주세요",
-                 lambda prog, cancelled: music.ensure_access(launch=True), done, fail)
+        run_task(self, "Apple Music 권한 확인 · 권한 창이 뜨면 '허용'을 눌러 주세요", job, done, fail)
 
     # ------------------------------------------------------------ 앨범아트
     def find_artwork(self):
