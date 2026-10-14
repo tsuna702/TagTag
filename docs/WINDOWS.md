@@ -75,6 +75,10 @@ Windows DLL 이름은 `Qt6Quick.dll` 처럼 `Qt6` 으로 시작해서 DROP 목�
 (그러면 맥의 release.sh 는 같은 태그가 있어 멈추므로, 보통은 맥에서 먼저 릴리스하고 Windows 를 붙인다).
 필요: `gh` (winget install GitHub.cli) 와 사용자가 직접 한 `gh auth login`.
 
+**릴리스 기록:** v0.8.2 — macOS 릴리스에 Windows zip 을 붙임. v0.8.3 — Windows 만 (windows 브랜치에서 새로 만듦,
+옮겨진 파일 찾기 고침). 그래서 **맥의 다음 릴리스는 0.8.4** 이고, 그 전에 `windows` 를 `main` 으로 합쳐
+(`main` 의 spec 은 아직 0.8.2) 맥에서 `tests/smoke.py` PASS 를 확인한다.
+
 설치 안내 (릴리스 노트): zip 을 풀고 `LocalTag.exe` 실행. 서명하지 않은 앱이라 처음에 "Windows의 PC 보호" 가 뜨면
 **추가 정보 → 실행**.
 
