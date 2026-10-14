@@ -56,6 +56,10 @@ Windows 에는 `os.pread`/`os.pwrite` 가 없고, `os.open` 은 `O_BINARY` 없�
   - 버전은 macOS spec 의 `CFBundleShortVersionString` 을 읽어 같은 번호를 쓴다 (버전 번호는 한 곳에서만 올린다).
 - `build_win.ps1`: venv 만들기 → 설치 → pyinstaller → `dist\LocalTag-<버전>-windows.zip`.
 
+**진행 (2026-10-14):** 됐다. `.\build_win.ps1` → `dist\LocalTag\LocalTag.exe` (폴더 약 64MB, zip 약 27MB).
+spec 이 빌드 때 `localtag/_version.py`(저장소에 넣지 않음)와 exe 버전 정보(탐색기 속성 → 자세히)를 만든다.
+Windows DLL 이름은 `Qt6Quick.dll` 처럼 `Qt6` 으로 시작해서 DROP 목록을 따로 두었고, `opengl32sw.dll`(약 20MB)도 뺀다.
+
 ## 3단계: 릴리스
 
 버전 번호는 macOS 와 같이 쓴다 (`packaging/LocalTag.spec`). 두 가지 중 하나 — 사용자와 정한다:
