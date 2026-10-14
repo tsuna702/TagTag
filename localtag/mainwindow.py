@@ -209,7 +209,7 @@ class MainWindow(QMainWindow):
     def _preload(self):
         """창이 뜬 직후 나머지 창 모듈을 미리 불러 둔다. 앱이 켜져 있는 동안 앱 파일이 새 버전으로
         바뀌어도(새로 빌드) 나중에 창을 열 때 다른 버전의 모듈을 읽지 않게 한다."""
-        from . import artworkdialog, backupdialog, compare, covermatch, dupes, export, extractdialog, exttags, ytclean, ytdialog  # noqa: F401
+        from . import artworkdialog, backupdialog, compare, covermatch, dupes, export, extractdialog, exttags, rename, renamedialog, ytclean, ytdialog  # noqa: F401
 
     def _prune_backups(self):
         try:
@@ -283,6 +283,8 @@ class MainWindow(QMainWindow):
         m = mb.addMenu("변환")
         for text, key, cls in CONVERTERS:
             self._act(m, text, lambda _=False, cls=cls: self.run_converter(cls), key)
+        m.addSeparator()
+        self._act(m, "곡명 · 파일명 일괄 변경…", self.batch_rename, "Alt+9")
 
         m = mb.addMenu("커버")
         self._act(m, "앨범아트 찾기 · 가져오기…", self.find_artwork, "Ctrl+Shift+A")
@@ -361,6 +363,8 @@ class MainWindow(QMainWindow):
         tb.addSeparator()
         self.tb_up = button("↑ 위로", lambda: self.move_selection(-1), "선택한 곡을 한 칸 위로 (⌥⌘↑)")
         self.tb_down = button("↓ 아래로", lambda: self.move_selection(1), "선택한 곡을 한 칸 아래로 (⌥⌘↓)")
+        self.tb_rename = button("일괄 변경…", self.batch_rename,
+                                "곡명·파일명을 규칙(바꾸기·붙이기·지우기·번호…)으로 한꺼번에 바꾸기 (⌥9) — 선택한 곡, 선택이 없으면 목록 전체")
         self.tb_number = button("트랙 번호…", self.number_tracks,
                                 "목록에 보이는 순서대로 트랙 번호 매기기 — 선택한 곡, 선택이 없으면 목록 전체")
         self._update_toolbar()
@@ -380,6 +384,7 @@ class MainWindow(QMainWindow):
         self.tb_up.setEnabled(has_sel)
         self.tb_down.setEnabled(has_sel)
         self.tb_number.setEnabled(has_files)
+        self.tb_rename.setEnabled(has_files)
 
     def show_about(self):
         ver = app_version()
@@ -439,6 +444,8 @@ class MainWindow(QMainWindow):
         conv = m.addMenu("변환")
         for text, _, cls in CONVERTERS:
             conv.addAction(text, lambda cls=cls: self.run_converter(cls))
+        conv.addSeparator()
+        conv.addAction("곡명 · 파일명 일괄 변경…", self.batch_rename)
         act = m.addMenu("액션")
         act.addAction("액션 그룹…", self.run_action_groups)
         act.addAction("빠른 액션…", self.quick_action)
@@ -920,6 +927,18 @@ class MainWindow(QMainWindow):
             a = dlg.result_action()
             self.settings.setValue(f"quick/{kind}", a)
             self._run_actions_with_preview(describe(a), [a], files)
+
+    def batch_rename(self):
+        """파일 이름 일괄 변경 프로그램처럼 규칙을 쌓아 곡명·파일명을 한꺼번에 바꾼다."""
+        self._confirm_pending()
+        files = self.selected_files() or self.visible_files()
+        if not files:
+            QMessageBox.information(self, APP_NAME, "바꿀 곡을 목록에 먼저 불러오세요.")
+            return
+        from .renamedialog import RenameDialog
+        dlg = RenameDialog(self, files, self.settings)
+        if dlg.exec():
+            self.apply_plans(dlg.result_plans(), "일괄 변경")
 
     def youtube_clean(self):
         """YouTube에서 받은 곡의 제목에서 꼬리말을 떼고 '아티스트 - 제목'을 나눈다.
