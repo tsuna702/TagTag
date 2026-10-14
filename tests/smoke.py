@@ -93,4 +93,47 @@ with open(dst, "rb") as fp:
 copy = os.path.join(d, "wb-copy.bin")
 safewrite.copy_preserving(dst, copy)
 check(os.path.getmtime(copy) == os.path.getmtime(dst), "복사할 때 수정 시각 유지")
+
+# 옮겨진 파일 찾기: 앨범 폴더 이름이 바뀌어도 파일 번호로 새 위치를 찾는다 (Music 폴더 정리처럼)
+album = os.path.join(d, "아이유 - 꽃갈피")
+check(all(x.ino for x in w.model.files), "파일 번호 읽기")
+os.rename(album, album + " 2")
+w.refresh()
+app.processEvents()
+moved = [x.path for x in w.model.files if os.path.dirname(x.path) == album + " 2"]
+check(len(moved) == 4 and len(w.model.files) == 5, f"옮겨진 파일 다시 찾기 ({len(moved)}개)")
+os.rename(album + " 2", album)
+w.refresh()
+app.processEvents()
+
+# 다른 프로그램이 파일을 잡고 있을 때: 원본은 그대로, 알림이 뜬다
+if osutil.IS_WIN:
+    import ctypes
+    from ctypes import wintypes
+
+    from PySide6.QtWidgets import QMessageBox
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateFileW.restype = wintypes.HANDLE
+    k32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+                                wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    shown_msgs = []
+    QMessageBox.warning = staticmethod(lambda *a, **k: shown_msgs.append(a[2]))
+    for share, name in ((1, "읽기만 허용 (재생 중인 플레이어처럼)"), (0, "공유 안 함")):
+        mp3 = next(x for x in w.model.files if x.path.endswith(".mp3"))
+        with open(mp3.path, "rb") as fp:
+            raw = fp.read()
+        h = k32.CreateFileW(mp3.path, 0x80000000, share, None, 3, 0x80, None)  # GENERIC_READ, OPEN_EXISTING
+        shown_msgs.clear()
+        try:
+            w.apply_plans([Plan(mp3, changes={"title": ["잠긴 파일"]})], "테스트")
+            app.processEvents()
+        finally:
+            k32.CloseHandle(h)
+        with open(mp3.path, "rb") as fp:
+            same = fp.read() == raw
+        print("   알림:", " / ".join(m.replace("\n", " ") for m in shown_msgs)[:200])
+        check(same and shown_msgs and safewrite.IN_USE in shown_msgs[0], f"파일을 잡고 있을 때 원본 그대로 · 알림 — {name}")
+        check(not [n for n in os.listdir(os.path.dirname(mp3.path)) if n.startswith(safewrite.STAGE_PREFIX)],
+              f"작업 사본 남지 않음 — {name}")
 finish()

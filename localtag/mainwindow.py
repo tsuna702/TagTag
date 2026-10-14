@@ -26,6 +26,7 @@ from .model import COLUMN_WIDTHS, COLUMNS, FileModel, SortProxy, fmt_length, fmt
 from .panel import TagPanel, changes_for
 from .rowdrag import RowDragger, move_to
 from .plan import Plan, UndoEntry, UndoItem
+from .safewrite import error_text
 from .tagio import (
     AUDIO_EXTS, AudioFile, Options, move_file, restore_snapshot, scan,
 )
@@ -796,7 +797,7 @@ class MainWindow(QMainWindow):
                     with open(path, "wb") as fh:
                         fh.write(data)
             except Exception as e:
-                failed.append((old_path, str(e)))
+                failed.append((old_path, error_text(e)))
                 if bentry is not None:
                     job.failed(bentry, str(e))
                 if held and os.path.exists(old_path):
@@ -884,7 +885,7 @@ class MainWindow(QMainWindow):
                 if f is not None:
                     self.model.replace(f, restored)
             except Exception as e:
-                failed.append((item.new_path, str(e)))
+                failed.append((item.new_path, error_text(e)))
         self._update_undo_action()
         self.panel.set_files(self.selected_files())
         self._update_status()

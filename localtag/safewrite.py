@@ -220,6 +220,14 @@ def _length(path):
 
 
 AUDIO_CHANGED = "오디오 데이터 검증에 실패했습니다. 원본은 그대로입니다."
+IN_USE = "다른 프로그램(플레이어 등)이 파일을 사용 중이라 저장하지 못했습니다. 원본은 그대로입니다."
+
+
+def error_text(e: Exception) -> str:
+    """사용자에게 보일 오류 문구. Windows 공유 위반(백업·이름 바꾸기 등 어디서 나든)은 알기 쉬운 말로."""
+    if getattr(e, "winerror", 0) == 32:
+        return IN_USE
+    return str(e)
 
 
 def safe_modify(path: str, fn, enabled: bool = True, keep_mtime: bool = False, inspect=None):
@@ -240,7 +248,12 @@ def safe_modify(path: str, fn, enabled: bool = True, keep_mtime: bool = False, i
     keep_stage = False
     result = None
     try:
-        copy_preserving(path, stage)
+        try:
+            copy_preserving(path, stage)
+        except PermissionError as e:
+            if IS_WIN and getattr(e, "winerror", 0) == 32:  # 공유 위반: 다른 프로그램이 열어 둠
+                raise SafeWriteError(IN_USE) from e
+            raise
         before_len = fn(stage)
         before_len = round(float(before_len), 2) if isinstance(before_len, (int, float)) else _length(path)
         if inspect:
@@ -317,7 +330,7 @@ def write_back(src: str, dst: str, protect=None):
             d = os.open(dst, os.O_RDWR | O_BINARY)
         except PermissionError as e:
             if IS_WIN:  # 다른 프로그램이 열어 둔 파일은 교체도 안 된다
-                raise SafeWriteError(f"다른 프로그램이 파일을 쓰는 중이라 저장하지 못했습니다. 원본은 그대로입니다.\n{e}") from e
+                raise SafeWriteError(IN_USE) from e
             d = None
         except OSError:
             d = None

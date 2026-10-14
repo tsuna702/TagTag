@@ -46,6 +46,8 @@ def _scan(root, missing, found):
                     if trust and e.inode() not in inodes:
                         continue
                     st = e.stat(follow_symlinks=False)
+                    if not st.st_ino:  # Windows: scandir 의 stat 에는 디스크·파일 번호가 비어 있다
+                        st = os.stat(e.path, follow_symlinks=False)
                     if trust is None:
                         trust = st.st_ino == e.inode()
                 except OSError:
