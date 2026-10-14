@@ -29,6 +29,7 @@ from .tagio import (
 )
 
 APP_NAME = "LocalTag"
+RELEASES_URL = "https://github.com/tsuna702/TagTag/releases"
 
 
 def app_version() -> str:
@@ -43,6 +44,22 @@ def app_version() -> str:
         except OSError:
             return "app"
     return "dev"
+
+
+def _app_icon():
+    """앱 아이콘 (번들의 LocalTag.icns, 개발 중이면 packaging/LocalTag.icns)."""
+    import sys
+    from PySide6.QtGui import QIcon
+    here = os.path.dirname(os.path.abspath(__file__))
+    for path in (os.path.join(os.path.dirname(os.path.dirname(sys.executable)), "Resources", "LocalTag.icns"),
+                 os.path.join(os.path.dirname(here), "packaging", "LocalTag.icns")):
+        if os.path.exists(path):
+            icon = QIcon(path)
+            if not icon.isNull():
+                return icon
+    return QApplication.windowIcon()
+
+
 LOAD_WORKERS = 4
 UNDO_LEVELS = 30
 UNDO_MEMORY = 512 * 1024 * 1024  # 실행 취소 기록이 이보다 커지면 오래된 것부터 버린다
@@ -206,6 +223,9 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         quit_act = self._act(m, "종료", self.close, QKeySequence.Quit)
         quit_act.setMenuRole(QAction.QuitRole)
+        # macOS에서는 메뉴 막대의 'LocalTag' 메뉴 맨 위로 옮겨진다
+        about = self._act(m, f"{APP_NAME} 정보", self.show_about)
+        about.setMenuRole(QAction.AboutRole)
 
         m = mb.addMenu("편집")
         self.undo_act = self._act(m, "실행 취소", self.undo, QKeySequence.Undo)
@@ -314,6 +334,24 @@ class MainWindow(QMainWindow):
         self.tb_refresh.setEnabled(has_files)
         self.tb_clear.setEnabled(has_files)
         self.tb_finder.setEnabled(self.table.selectionModel().hasSelection())
+
+    def show_about(self):
+        ver = app_version()
+        shown = "개발 중 실행 (dev)" if ver == "dev" else ver
+        box = QMessageBox(self)
+        box.setWindowTitle(f"{APP_NAME} 정보")
+        icon = _app_icon()
+        if not icon.isNull():
+            box.setIconPixmap(icon.pixmap(64, 64))
+        box.setTextFormat(Qt.RichText)
+        box.setText(f"<b style='font-size:15px'>{APP_NAME}</b><br>버전 {shown}")
+        box.setInformativeText(
+            "macOS용 음악 태그 편집기<br><br>"
+            f"<a href='{RELEASES_URL}'>새 버전 · 바뀐 점 보기</a>")
+        for label in box.findChildren(QLabel):
+            label.setOpenExternalLinks(True)
+            label.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        box.exec()
 
     def _set_opt(self, name, value):
         setattr(self.opts, name, value)
