@@ -484,6 +484,7 @@ class MainWindow(QMainWindow):
             return
         dlg = AutoNumber(self, files, self.settings)
         if dlg.exec():
+            self._take_order(dlg)
             self.apply_plans(dlg.result_plans(), "자동 번호 매기기")
 
     def _confirm_pending(self) -> bool:
@@ -832,7 +833,16 @@ class MainWindow(QMainWindow):
             return
         dlg = cls(self, files, self.settings)
         if dlg.exec():
+            self._take_order(dlg)
             self.apply_plans(dlg.result_plans(), cls.title.replace("변환: ", ""))
+
+    def _take_order(self, dlg):
+        """자동 번호 매기기 창에서 바꾼 곡 순서를 목록에도 반영한다."""
+        if not getattr(dlg, "moved", False):
+            return
+        if self.model.sort_column >= 0:
+            self.table.horizontalHeader().setSortIndicator(-1, Qt.AscendingOrder)
+        self.model.arrange(dlg.files)
 
     def _run_actions_with_preview(self, label, actions, files):
         dlg = PlansPreview(self, files, self.settings, f"액션: {label}",

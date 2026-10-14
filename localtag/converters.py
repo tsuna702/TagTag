@@ -4,8 +4,8 @@ from __future__ import annotations
 import os
 import re
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QBrush, QColor, QGuiApplication
+from PySide6.QtCore import QItemSelectionModel, Qt, QTimer
+from PySide6.QtGui import QBrush, QColor, QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QSpinBox, QDialogButtonBox, QFileDialog, QFormLayout,
     QHBoxLayout, QHeaderView, QLabel, QPlainTextEdit, QPushButton, QSizePolicy,
@@ -578,11 +578,49 @@ class AutoNumber(ConverterDialog):
         return sb
 
     def build(self):
+        self.files = list(self.files)  # 이 창에서 순서를 바꿔도 부른 쪽 목록은 그대로
+        self.moved = False
         self.start = self._spin("시작 번호:", "num_start", 0, 9999, 1)
         self.digits = self._spin("자릿수 (앞을 0으로 채움):", "num_digits", 1, 4, 2)
         self.total = self.add_check("전체 곡 수도 넣기 (예: 03/12)", "num_total", False)
         self.per_folder = self.add_check("폴더가 바뀌면 다시 시작", "num_per_folder", True)
         self.disc = self.add_check("폴더마다 디스크 번호도 1, 2, 3… 으로 매기기", "num_disc", False)
+        row = QHBoxLayout()
+        for text, delta, key in (("↑ 위로", -1, "Ctrl+Alt+Up"), ("↓ 아래로", 1, "Ctrl+Alt+Down")):
+            b = QPushButton(text)
+            b.setToolTip(f"아래 표에서 고른 곡을 한 칸 {'위' if delta < 0 else '아래'}로 ({'⌥⌘↑' if delta < 0 else '⌥⌘↓'})")
+            b.setShortcut(QKeySequence(key))
+            b.setAutoDefault(False)
+            b.clicked.connect(lambda _=False, d=delta: self.move(d))
+            row.addWidget(b)
+        hint = QLabel("표에서 곡을 골라 순서를 바꾸면 번호가 바로 다시 매겨집니다 (목록 순서도 함께 바뀝니다)")
+        hint.setStyleSheet("color: gray;")
+        row.addWidget(hint, 1)
+        self.form.addRow("순서:", row)
+
+    def move(self, delta):
+        rows = sorted({i.row() for i in self.table.selectionModel().selectedRows()})
+        if not rows:
+            return
+        picked = {id(self.plans[r].file) for r in rows if r < len(self.plans)}
+        order = list(self.files)
+        idx = range(len(order)) if delta < 0 else range(len(order) - 1, -1, -1)
+        for i in idx:
+            j = i + delta
+            # 맨 끝에 닿은 곡이 있으면 넘어가지 않는다 (고른 곡끼리의 순서는 그대로)
+            if id(order[i]) in picked and 0 <= j < len(order) and id(order[j]) not in picked:
+                order[i], order[j] = order[j], order[i]
+        if all(a is b for a, b in zip(order, self.files)):
+            return
+        self.files = order
+        self.moved = True
+        self.refresh()
+        sm = self.table.selectionModel()
+        for r, f in enumerate(self.files):
+            if id(f) in picked:
+                sm.select(self.table.model().index(r, 0), QItemSelectionModel.Select | QItemSelectionModel.Rows)
+        first = next(r for r, f in enumerate(self.files) if id(f) in picked)
+        self.table.scrollTo(self.table.model().index(first, 0))
 
     def headers(self):
         return ["파일명", "현재 트랙", "새 트랙", "디스크", "상태"]
