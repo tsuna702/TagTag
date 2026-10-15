@@ -119,6 +119,20 @@ def run_source(self):
     check(self.results.item(0, 0).text() == "먼저 앨범" and picked[-1] == "b", f"연도로 정렬 뒤 고르기 {picked}")
     del self._pick_release
     self._set_release(rel)
+    check(self.preview.text() == "커버 없음", "커버 없는 앨범은 '커버 없음'")
+    from PySide6.QtCore import QBuffer
+    from PySide6.QtGui import QImage
+    img, buf = QImage(300, 300, QImage.Format_RGB32), QBuffer()
+    img.fill(0x3366cc)
+    buf.open(QBuffer.WriteOnly)
+    img.save(buf, "PNG")
+    self._set_preview(bytes(buf.data()))
+    pm = self.preview.pixmap()
+    check(not pm.isNull() and max(pm.width(), pm.height()) <= 110, "커버 미리보기 그림")
+    self.check_all(False)
+    check(not any(cb.isChecked() for cb in [*self.checks.values(), self.totals, self.cover]), "모두 해제")
+    self.check_all(True)
+    check(all(cb.isChecked() for cb in [*self.checks.values(), self.totals, self.cover]), "모두 선택")
     names = [f.filename for f in self.files]
     pairs = dict(zip(names, self.pairs))
     # 트랙 번호·길이로 1→0, 2→1, 3→2, 새 파일(제목 같음, 4번) → 3

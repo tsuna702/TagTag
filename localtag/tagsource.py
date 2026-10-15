@@ -285,7 +285,7 @@ def get(rel: Release, country: str = "kr") -> Release:
 
 def cover_url(rel: Release, size: int) -> str:
     if rel.source == "mb":  # Cover Art Archive 는 250·500·1200 과 원본만
-        return rel.artwork + ("-500" if size <= 600 else "-1200" if size <= 1500 else "")
+        return rel.artwork + ("-250" if size <= 250 else "-500" if size <= 600 else "-1200" if size <= 1500 else "")
     from .extract import hi_res
     return hi_res(rel.artwork, size)
 

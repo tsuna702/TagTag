@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QBrush, QColor
+from PySide6.QtGui import QBrush, QColor, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView,
     QLabel, QLineEdit, QPushButton, QSplitter, QTableWidget, QTableWidgetItem,
@@ -23,6 +23,7 @@ FIELDS = [("title", "제목"), ("artist", "아티스트"), ("album", "앨범"), 
 COVER_SIZES = [600, 1000, 1500, 3000]
 WEAK = QBrush(QColor(205, 120, 0))
 GRAY = QBrush(QColor(140, 140, 140))
+PREVIEW = 110  # 커버 미리보기 크기 (px)
 
 
 class TagSourceDialog(QDialog):
@@ -49,7 +50,7 @@ class TagSourceDialog(QDialog):
             self.country.addItem(t, k)
         self.country.setCurrentIndex(max(0, self.country.findData(settings.value("source/country", "kr", str))))
         self.country.setToolTip("이 스토어의 이름으로 가져옵니다 — 검색 결과가 없으면 일본·미국 스토어에서 찾은 뒤 이 스토어 이름으로 바꿉니다")
-        self.use_mb = QCheckBox("MusicBrainz 도")
+        self.use_mb = QCheckBox("MusicBrainz")
         self.use_mb.setChecked(settings.value("source/musicbrainz", True, bool))
         self.use_mb.setToolTip("Apple Music 결과 뒤에 MusicBrainz 결과를 붙입니다 — 애니·게임 OST 처럼 Apple Music 에 없는 앨범")
         go = QPushButton("검색")
@@ -73,17 +74,28 @@ class TagSourceDialog(QDialog):
         self.results.setWordWrap(False)
         rh = self.results.horizontalHeader()
         rh.setSectionResizeMode(QHeaderView.Interactive)
-        for c, w in enumerate((240, 130, 50, 50, 60)):
-            self.results.setColumnWidth(c, w)
-        rh.setStretchLastSection(True)
+        rh.setSectionResizeMode(0, QHeaderView.Stretch)  # 앨범 칸이 남는 폭을 차지 → 연도·곡 수·나라가 늘 보임
+        for c, w in enumerate((0, 110, 46, 46, 56, 50)):
+            if c:
+                self.results.setColumnWidth(c, w)
         self.results.currentCellChanged.connect(lambda row, *_: self._pick_release(self._release_row(row)))
         split.addWidget(self.results)
         right = QWidget()
         rv = QVBoxLayout(right)
         rv.setContentsMargins(0, 0, 0, 0)
+        head = QHBoxLayout()
+        self.preview = QLabel()
+        self.preview.setFixedSize(PREVIEW, PREVIEW)
+        self.preview.setAlignment(Qt.AlignCenter)
+        self.preview.setStyleSheet("border: 1px solid rgba(128,128,128,0.4); color: gray;")
+        self.preview.setToolTip("고른 앨범의 커버")
         self.album_label = QLabel("왼쪽에서 앨범을 고르세요.")
         self.album_label.setWordWrap(True)
-        rv.addWidget(self.album_label)
+        self.album_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        head.addWidget(self.preview)
+        head.addWidget(self.album_label, 1)
+        rv.addLayout(head)
+        self._previews = {}
         self.table = QTableWidget(len(files), 6)
         self.table.setHorizontalHeaderLabels(["곡 (지금)", "짝지은 Apple Music 곡", "새 제목", "새 아티스트", "새 번호", "맞음"])
         self.table.verticalHeader().hide()
@@ -115,6 +127,14 @@ class TagSourceDialog(QDialog):
 
         box = QGroupBox("넣을 정보")
         g = QGridLayout(box)
+        allrow = QHBoxLayout()
+        allrow.addStretch(1)
+        for text, on in (("모두 선택", True), ("모두 해제", False)):
+            b = QPushButton(text)
+            b.setAutoDefault(False)
+            b.clicked.connect(lambda _=False, on=on: self.check_all(on))
+            allrow.addWidget(b)
+        g.addLayout(allrow, 2, 3)
         saved = settings.value("source/fields", [k for k, _ in FIELDS] + ["cover"])
         if isinstance(saved, str):
             saved = [saved]
@@ -210,6 +230,7 @@ class TagSourceDialog(QDialog):
         bits = " · ".join(x for x in (rel.year, rel.genre, f"곡 {len(rel.tracks)}개", ts.SOURCES[rel.source]) if x)
         nocover = " · 커버 없음" if not rel.artwork else ""
         self.album_label.setText(f"<b>{rel.album}</b> — {rel.artist} · {bits}{nocover}")
+        self._show_preview(rel)
         for i in range(len(self.files)):
             cb = QComboBox()
             cb.addItem("— 짝 없음 —", None)
@@ -218,6 +239,48 @@ class TagSourceDialog(QDialog):
             cb.currentIndexChanged.connect(lambda _x, i=i, cb=cb: self._set_pair(i, cb.currentData(), manual=True))
             self.table.setCellWidget(i, 1, cb)
         self.pair_auto()
+
+    def _show_preview(self, rel):
+        """커버 미리보기 — 작은 그림을 뒤에서 받는다 (실패해도 조용히)."""
+        if not rel.artwork:
+            self.preview.setPixmap(QPixmap())
+            self.preview.setText("커버 없음")
+            return
+        url = ts.cover_url(rel, 250)
+        if url in self._previews:
+            self._set_preview(self._previews[url])
+            return
+        self.preview.setPixmap(QPixmap())
+        self.preview.setText("…")
+        self._preview_url = url
+
+        def done(data):
+            self._previews[url] = data
+            if self._preview_url == url:  # 그 사이 다른 앨범을 고르지 않았으면
+                self._set_preview(data)
+
+        def failed(_msg):
+            if self._preview_url == url:
+                self.preview.setText("커버를\n못 받음")
+
+        from . import artwork as art
+        run_task(self, "", lambda prog, cancelled: art.fetch(url, 5 * 1024 * 1024), done, failed, modal=False)
+
+    def _set_preview(self, data):
+        pm = QPixmap()
+        if data and pm.loadFromData(data):
+            self.preview.setPixmap(pm.scaled(PREVIEW, PREVIEW, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            self.preview.setToolTip(f"고른 앨범의 커버 (미리보기 {pm.width()} × {pm.height()})")
+        else:
+            self.preview.setPixmap(QPixmap())
+            self.preview.setText("커버를\n못 받음")
+
+    def check_all(self, on: bool):
+        for cb in list(self.checks.values()) + [self.totals, self.cover]:
+            cb.blockSignals(True)
+            cb.setChecked(on)
+            cb.blockSignals(False)
+        self._refresh_rows()
 
     # ------------------------------------------------------------ 짝짓기
     def _apply_pairs(self, pairs):
