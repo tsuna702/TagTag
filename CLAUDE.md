@@ -30,8 +30,11 @@ Mp3tag 를 본뜬 음악 태그 편집기. Python 3 + PySide6(Qt) + mutagen. Git
    - 샘플은 저장소 `samples/` 를 실행 폴더로 복사해서 쓴다. 원본 샘플을 고치지 않는다.
    - 실행: `python tests/smoke.py`, `python tests/test_*.py` (Windows: `.venv\Scripts\python tests\smoke.py`).
      새 기능에는 `tests/` 에 테스트를 더한다. 인터넷이 필요한 기능은 가짜 데이터로 시험한다.
-3. **서명 인증서를 만들자고 제안하지 않는다.** macOS 는 PyInstaller 임시(ad-hoc) 서명 그대로 — 사용자가 거절했다.
-   Windows 도 서명하지 않은 `.exe` 로 시작한다 (SmartScreen 경고는 감수). 유료 인증서는 사용자가 먼저 말할 때만.
+3. **서명:** macOS 는 사용자가 만든 **자체 서명 인증서 `LocalTag Signing`**(맥 로그인 키체인, 2027-10-15 만료)으로
+   서명한다 — `build_app.sh` 가 인증서가 있으면 자동으로 쓴다(1.0.0 부터). 서명 주체가 같아서 새 버전마다 Music 권한을
+   다시 묻지 않는다. 사용자 혼자 쓰는 앱이라 유료 Developer ID·공증은 하지 않는다. 키체인의 인증서를 만들거나 지우는
+   일은 사용자가 직접 한다 (만료가 다가오면 새로 만들도록 안내 — 유효 기간 3650일 권장, 바꾼 첫 버전에서 권한을 한 번 더 묻는다).
+   Windows 는 서명하지 않은 `.exe` (SmartScreen 경고는 감수).
 4. **Music 에서 곡을 경로로 찾지 않는다 (`whose location is`).** 그렇게 찾으면 Music 이 보관함의 곡 파일을
    확인하다가 바뀐 파일을 한꺼번에 다시 읽고 폴더도 옮겨, 앨범 화면에서 곡이 갈라져 보인다(데이터는 맞음).
    그래서 저장하기 **전에** 제목·앨범으로 찾아 persistent ID 를 받아 두고(`music.prelookup`), 저장 뒤에는 ID 로만
