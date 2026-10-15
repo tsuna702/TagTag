@@ -51,6 +51,7 @@ Mp3tag 를 본뜬 음악 태그 편집기. Python 3 + PySide6(Qt) + mutagen. Git
   곡당 몇 ms 씩 든다 (1.0.1: 300곡 저장 6.6초 → 2.1초). 그래서 사본을 받는 함수는 경로 대신 파일 객체도 받을 수 있고,
   mutagen 에 넘길 때는 꼭 `rewind(path)` 를 거친다 (`mf.save()` 처럼 인자 없이 부르지 말고 `mf.save(rewind(path))`).
 - 백업 기록(journal.log)은 `BACKUP_BATCH` 곡씩 백업 사본을 먼저 만들고 한 번에 fsync 한다 — 원본을 바꾸기 전에 확정된다.
+- 태그 가져오기의 인터넷 요청은 서로 기다릴 필요가 없으면 `tagsource._together` 로 동시에 보낸다 (스토어 여러 곳 + MusicBrainz).
 - 파일을 바꾸는 작업은 `Plan` 목록을 만들어 `MainWindow.apply_plans` 로 적용한다 → 백업·실행 취소·Music 반영이 따라온다.
 - 열 추가는 `model.COLUMNS` **끝에** 붙인다 (저장해 둔 열 배치가 어긋나지 않게).
 - 무거운 창 모듈은 함수 안에서 import 하고 `MainWindow._preload` 목록에도 넣는다.

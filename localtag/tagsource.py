@@ -10,6 +10,7 @@ import re
 import threading
 import time
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from urllib import parse
 
@@ -79,6 +80,17 @@ def _json(url, headers=None):
         raise SourceError(str(e)) from e
 
 
+def _together(*calls) -> list:
+    """인터넷 요청 여러 개를 동시에 (기다리는 시간이 더해지지 않게). 결과 또는 SourceError 를 순서대로."""
+    def run(fn):
+        try:
+            return fn()
+        except SourceError as e:
+            return e
+    with ThreadPoolExecutor(len(calls)) as ex:
+        return list(ex.map(run, calls))
+
+
 def album_id_from(text: str):
     """Apple Music 앨범 링크나 숫자 ID → (ID, 국가) 또는 None."""
     s = text.strip()
@@ -102,10 +114,16 @@ def search(term: str, country: str = "kr") -> list[Release]:
     if not term.strip():
         raise SourceError("검색어를 넣어 주세요.")
     # 한국 스토어는 공개 API 의 앨범 검색이 비어 온다 → 일본·미국 스토어에서 찾고,
-    # 고른 스토어에도 있는 앨범은 그 스토어 것으로 표시한다 (곡 목록도 그 스토어 이름으로 받는다)
-    for c in dict.fromkeys([country, "jp", "us"]):
-        r = _json("https://itunes.apple.com/search?" + parse.urlencode(
-            {"term": term.strip(), "country": c, "media": "music", "entity": "album", "limit": 50}))
+    # 고른 스토어에도 있는 앨범은 그 스토어 것으로 표시한다 (곡 목록도 그 스토어 이름으로 받는다).
+    # 세 스토어를 동시에 찾고 앞 순서의 결과를 쓴다
+    stores = list(dict.fromkeys([country, "jp", "us"]))
+    answers = _together(*[lambda c=c: _json("https://itunes.apple.com/search?" + parse.urlencode(
+        {"term": term.strip(), "country": c, "media": "music", "entity": "album", "limit": 50})) for c in stores])
+    for c, r in zip(stores, answers):
+        if isinstance(r, SourceError):
+            if all(isinstance(x, SourceError) for x in answers):
+                raise r
+            continue
         out, seen = [], set()
         for x in r.get("results", []):
             rel = _release(x)
@@ -147,9 +165,16 @@ def lookup(album_id: str, country: str = "kr") -> Release:
     """앨범 하나와 곡 목록. 한국 등 일부 국가는 곡 목록이 비어 오므로 다른 국가에서 곡 ID 를 받아
     고른 국가로 그 곡들을 다시 찾는다 (곡 ID 로 찾으면 한국 스토어도 한국어 제목을 준다)."""
     album, tracks, home = None, [], None
-    for c in dict.fromkeys([country, "jp", "us", "gb"]):
-        r = _json("https://itunes.apple.com/lookup?" + parse.urlencode(
-            {"id": album_id, "entity": "song", "country": c, "limit": 200}))
+    stores = list(dict.fromkeys([country, "jp", "us", "gb"]))
+    get = lambda c: _json("https://itunes.apple.com/lookup?" + parse.urlencode(  # noqa: E731
+        {"id": album_id, "entity": "song", "country": c, "limit": 200}))
+    first = dict(zip(stores[:2], _together(*[lambda c=c: get(c) for c in stores[:2]])))  # 앞 두 스토어는 동시에
+    for c in stores:
+        r = first.get(c) or get(c)
+        if isinstance(r, SourceError):
+            if c == stores[-1]:
+                raise r
+            continue
         res = r.get("results", [])
         found = next((x for x in res if x.get("wrapperType") == "collection"), None)
         if found and c == country:
@@ -259,21 +284,16 @@ def find(term: str, country: str = "kr", musicbrainz: bool = True) -> list[Relea
     """Apple Music 결과 뒤에 MusicBrainz 결과를 붙인다 (한쪽이 실패해도 다른 쪽 결과는 보여 준다)."""
     if mbid_from(term):
         return [mb_lookup(mbid_from(term))]
-    apple, err = [], None
-    try:
-        apple = search(term, country)
-    except SourceError as e:
-        err = e
     if album_id_from(term) or not musicbrainz:
-        if err:
-            raise err
+        return search(term, country)
+    apple, mb = _together(lambda: search(term, country), lambda: mb_search(term))  # 두 곳을 동시에
+    if isinstance(mb, SourceError):
+        if isinstance(apple, SourceError):
+            raise apple
         return apple
-    try:
-        found = apple + mb_search(term)
-    except SourceError:
-        if err:
-            raise
-        return apple
+    if isinstance(apple, SourceError):
+        apple = []
+    found = apple + mb
     # 검색어와 앨범 이름이 거의 같은 것을 출처에 상관없이 맨 위로 (나머지는 원래 순서)
     return sorted(found, key=lambda r: similarity(r.album, term) < 0.85)
 

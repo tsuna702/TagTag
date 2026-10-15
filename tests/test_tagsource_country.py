@@ -5,6 +5,7 @@
 """
 import os
 import sys
+import time
 from urllib import parse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -31,6 +32,8 @@ def track(c, i):
 def fake_json(url):
     q = dict(parse.parse_qsl(parse.urlsplit(url).query))
     c = q["country"]
+    if c not in STORE:  # 다른 스토어에는 없음
+        return {"results": []}
     calls.append((url.split("?")[0].rsplit("/", 1)[1], c))
     album = dict(ALBUM, artistName=STORE[c]["artistName"], collectionName=STORE[c]["collectionName"])
     if "search" in url:
@@ -60,4 +63,21 @@ check(rel.country == "jp" and rel.tracks[0].title == "My Old Story", "일본을 
 ts._json = lambda url: {"results": []} if "country=kr" in url else fake_json(url)
 rel = ts.lookup("1", "kr")
 check(rel.country == "jp" and rel.tracks[0].title == "My Old Story", "한국에 없는 앨범 → 일본 것 그대로, 일본으로 표시")
+
+# 스토어 여러 곳·MusicBrainz 를 하나씩 기다리지 않고 동시에 찾는다 (요청마다 0.3초 걸린다고 치고)
+def slow(url):
+    time.sleep(0.3)
+    return fake_json(url)
+
+
+ts._json = slow
+ts.mb_search = lambda term: (time.sleep(0.3), [])[1]
+t = time.perf_counter()
+rs = ts.find("아이유 꽃갈피", "kr")
+took = time.perf_counter() - t
+check(rs and rs[0].country == "kr" and took < 0.9, f"스토어 3곳 + 이름 바꾸기 + MusicBrainz 를 {took:.2f}초에 (하나씩이면 1.5초)")
+t = time.perf_counter()
+rel = ts.lookup("1", "kr")
+took = time.perf_counter() - t
+check(rel.tracks[0].title == "나의 옛날이야기" and took < 0.8, f"곡 목록 {took:.2f}초 (하나씩이면 0.9초)")
 finish()
