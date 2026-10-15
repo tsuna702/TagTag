@@ -1229,6 +1229,9 @@ class MainWindow(QMainWindow):
                 parts.append(f"실패 {len(res.failed)}곡")
             if moved:
                 parts.append(f"옮겨진 파일 {moved}개 다시 연결")
+            if res.changed:
+                # 반영하는 사이 Music 에서 직접 고친 곡 — 그 값을 따르고 목록을 다시 읽는다
+                parts.append(f"Music에서 고친 값을 따름 {self._reload_paths(res.changed, res.relocated)}곡")
             self.statusBar().showMessage("Music: " + " · ".join(parts), 10000)
             if not modal and not (res.unconfirmed or res.failed):
                 return
@@ -1269,6 +1272,12 @@ class MainWindow(QMainWindow):
             found = find_moved([(p, *inode.get(os.path.realpath(p), (0, 0))) for p in ps])
             return found
 
+        opts = self.opts
+
+        def file_values(path):
+            f = AudioFile.load(path, opts)
+            return f.get("title").split("\\\\")[0], f.get("album").split("\\\\")[0]
+
         def job(prog, cancelled):
             prog(0, len(paths), "옮겨진 파일이 있는지 확인하는 중")
             moved = find_moved(entries, cancelled)          # 반영 전에 이미 옮겨진 파일
@@ -1277,7 +1286,8 @@ class MainWindow(QMainWindow):
                 if p in moved:
                     inode[os.path.realpath(moved[p])] = inode.get(os.path.realpath(p), (0, 0))
             exp = {moved.get(p, p): v for p, v in expected.items()}
-            res = music.refresh(now, prog, cancelled, exp, relocate=relocate, pace=pace)
+            res = music.refresh(now, prog, cancelled, exp, relocate=relocate, pace=pace,
+                                file_values=file_values)
             # music.refresh 의 키는 '반영 시작 때 경로'이므로 목록의 원래 경로로 되돌린다
             orig = {os.path.realpath(moved.get(p, p)): os.path.realpath(p) for p in paths}
             final = {}
@@ -1290,10 +1300,30 @@ class MainWindow(QMainWindow):
             res.failed = [(orig.get(k, k), why) for k, why in res.failed]
             res.unconfirmed = [orig.get(k, k) for k in res.unconfirmed]
             res.notfound = [orig.get(k, k) for k in res.notfound]
+            res.changed = [orig.get(k, k) for k in res.changed]
             return res
 
         run_task(self, "Apple Music에 반영", job,
                  done, fail, modal=modal, status=lambda m: self.statusBar().showMessage(m, 3000))
+
+    def _reload_paths(self, paths, relocated):
+        """목록의 이 파일들을 지금 파일 내용으로 다시 읽는다 (옮겨졌으면 새 위치에서)."""
+        by_path = {os.path.realpath(f.path): f for f in self.model.files}
+        n = 0
+        for p in paths:
+            now = relocated.get(os.path.realpath(p), p)
+            # 옮겨진 곡은 목록이 이미 새 경로로 바뀌어 있다
+            f = by_path.get(os.path.realpath(now)) or by_path.get(os.path.realpath(p))
+            if f is None:
+                continue
+            try:
+                self.model.replace(f, AudioFile.load(now, self.opts))
+                n += 1
+            except Exception:
+                pass
+        if n:
+            self.panel.set_files(self.selected_files())
+        return n
 
     def _run_waiting_undo(self):
         if getattr(self, "_undo_waiting", False):

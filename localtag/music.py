@@ -420,7 +420,18 @@ class RefreshResult:
         self.notfound = []      # Music 보관함에 없는 파일
         self.failed = []        # (처음 받은 경로, 이유)
         self.relocated = {}     # 처음 받은 경로 → 지금 경로 (옮겨진 경우만)
+        self.changed = []       # 반영하는 사이 Music 등에서 파일이 다시 바뀐 곡 (처음 받은 경로) — 그 값을 따른다
         self.retried = 0
+
+
+def _changed_elsewhere(file_values, path, want) -> bool:
+    """파일에 든 제목·앨범이 LocalTag 가 저장한 값과 다르면 True (그사이 다른 곳에서 고침)."""
+    try:
+        title, album = file_values(path)
+    except Exception:
+        return False
+    w_title, w_album = want
+    return bool((w_title and _norm(title) != _norm(w_title)) or (w_album and _norm(album) != _norm(w_album)))
 
 
 def _lookup(cur, keys, progress, cancelled):
@@ -456,7 +467,7 @@ def _lookup(cur, keys, progress, cancelled):
 
 
 def refresh(paths, progress=lambda *_: None, cancelled=lambda: False, expected=None, rounds=3,
-            relocate=None, pace=DEFAULT_PACE):
+            relocate=None, pace=DEFAULT_PACE, file_values=None):
     """바꾼 파일을 Music에서 다시 읽게 하고, 실제로 반영됐는지 확인한다.
 
     1) 경로로 곡을 모두 찾아 persistent ID 를 얻는다 (아직 아무것도 반영하지 않음)
@@ -466,6 +477,8 @@ def refresh(paths, progress=lambda *_: None, cancelled=lambda: False, expected=N
     expected: {경로: (제목, 앨범)}
     relocate: 옮겨진 파일의 새 경로를 찾는 함수 ([경로] → {옛 경로: 새 경로}). 찾기 재시도 전에 부른다.
     pace: 반영 속도 (PACES 의 키)
+    file_values: 경로 → 파일에 지금 들어 있는 (제목, 앨범). Music 에 보이는 값이 기대와 다를 때, 파일도 이미
+        다른 값으로 바뀌었으면(반영하는 사이 Music 에서 직접 고친 경우) 다시 반영하지 않고 그 값을 따른다.
     """
     min_wait, max_wait = PACES.get(pace, PACES[DEFAULT_PACE])
     ticks = [str(max(1, round(min_wait / 0.2))), str(max(2, round(max_wait / 0.2)))]
@@ -522,7 +535,7 @@ def refresh(paths, progress=lambda *_: None, cancelled=lambda: False, expected=N
         else:
             time.sleep(max(1.5, min_wait) if rnd == 1 else 2.5 + min_wait)  # Music이 마저 정리할 시간
             mode = "read" if rnd == 1 else "refresh"
-            msg = "Music에 반영됐는지 확인하는 중" if rnd == 1 else f"아직 옛 정보인 곡 다시 반영 ({rnd - 1}/{rounds})"
+            msg = "Music에 반영됐는지 확인하는 중" if rnd == 1 else f"아직 옛 정보인 곡 다시 반영 · {rnd - 1}번째"
         ids = list(dict.fromkeys(pending.values()))
         if mode == "refresh":
             want = {}
@@ -558,6 +571,8 @@ def refresh(paths, progress=lambda *_: None, cancelled=lambda: False, expected=N
                     ok = False
             if ok:
                 res.confirmed += 1
+            elif file_values and _changed_elsewhere(file_values, cur[k], want):
+                res.changed.append(k)
             else:
                 still[k] = pid
         pending = still

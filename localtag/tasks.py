@@ -44,7 +44,8 @@ def run_task(parent, title, fn, on_done, on_fail, modal=True, status=None):
             if msg:
                 dlg.setLabelText(msg)
         elif status and msg:
-            status(f"{msg} ({cur}/{total})")
+            # 메시지에 이미 개수가 들어 있으면 한 번 더 붙이지 않는다
+            status(msg if f"{cur}/{total}" in msg else f"{msg} ({cur}/{total})")
 
     def finish(handler, value):
         if dlg:
