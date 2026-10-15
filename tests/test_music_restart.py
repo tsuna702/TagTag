@@ -68,7 +68,8 @@ w = window()
 w.load_paths([os.path.join(d, "아이유 - 꽃갈피")], replace=True)
 app.processEvents()
 calls = []
-w._music_refresh_paths = lambda paths, modal=True, album_change=False: calls.append(album_change)
+w._music_refresh_paths = lambda paths, modal=True, album_change=False, known_pids=None: calls.append(album_change)
+w._music_prelookup = lambda files: {}  # 실제 Music 에 묻지 않는다
 w.settings.setValue("music_auto", True)
 music.IS_MAC = True
 f = w.model.files[0]

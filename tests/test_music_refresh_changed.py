@@ -38,6 +38,14 @@ check(calls.count("refresh") == 1 + 3, f"다시 반영은 늦은 곡만 3번 ({c
 calls.clear()
 res = music.refresh([A, B], expected={A: ("새 제목", "앨범"), B: ("새 제목", "앨범")})
 check(not res.changed and sorted(res.unconfirmed) == sorted([A, B]), "file_values 없으면 예전 동작")
+# 저장 전에 찾아 둔 ID(known_pids)가 있으면 위치로 다시 찾지 않는다 (위치로 찾으면 Music 이 몰아서 다시 읽는다)
+looked = []
+music._lookup = lambda cur, keys, progress, cancelled: (looked.extend(keys), ({k: "PB" for k in keys}, {}))[1]
+calls.clear()
+res = music.refresh([A, B], expected={A: ("사용자가 고친 제목", "앨범"), B: ("옛 제목", "앨범")}, known_pids={A: "PA"})
+check(looked == [B], f"ID 를 아는 곡은 위치로 찾지 않음 {looked}")
+check(res.confirmed == 2, f"둘 다 반영 확인 {res.confirmed}")
+
 # 진행 표시에 개수가 두 번 붙지 않음 (실제 run_task 의 상태 표시줄 경로)
 import time  # noqa: E402
 

@@ -61,6 +61,67 @@ on run wantedPaths
 end run
 '''
 
+# 저장하기 전에 곡의 persistent ID 를 찾는다: 지금 제목·앨범으로 후보를 찾고 그 후보의 위치만 확인한다.
+#   'whose location is' 로 찾으면 Music 이 보관함의 모든 곡 파일을 확인하면서, 바뀐 파일들을 한꺼번에 다시
+#   읽어 버린다 (반영 속도와 상관없이 몰아서 반영되어 앨범 화면이 갈라지는 원인). 이 방식은 열 배쯤 빠르기도 하다.
+#   인자 = <경로>, <제목>, <앨범>, …   LOCALTAG_RESULT:<경로>\t<persistent ID 또는 빈 칸>
+PRELOOKUP_SCRIPT = '''
+on run argv
+    tell application "Music"
+        if not running then return "DONE"
+    end tell
+    set i to 0
+    repeat with k from 1 to (count of argv) by 3
+        set p to item k of argv
+        set pid to ""
+        try
+            tell application "Music"
+                with timeout of 60 seconds
+                    set cands to (every file track of library playlist 1 whose name is (item (k + 1) of argv) and album is (item (k + 2) of argv))
+                    repeat with c in cands
+                        try
+                            if POSIX path of (location of c as alias) is p then
+                                set pid to persistent ID of c
+                                exit repeat
+                            end if
+                        end try
+                    end repeat
+                end timeout
+            end tell
+        on error errText number errNum
+            if errNum is -1743 then error errText number errNum
+        end try
+        set i to i + 1
+        log "LOCALTAG_RESULT:" & p & tab & pid
+        log "LOCALTAG_PROGRESS:" & i
+    end repeat
+    return "DONE"
+end run
+'''
+
+
+def prelookup(items, progress=lambda *_: None, cancelled=lambda: False) -> dict:
+    """저장하기 전 곡들의 persistent ID. items: [(경로, 지금 제목, 지금 앨범)] → {실제 경로: pid} (찾은 것만).
+    Music 이 꺼져 있거나 권한이 없으면 빈 dict (반영할 때 예전 방식으로 찾는다)."""
+    if not items or not _music_running():
+        return {}
+    out = {}
+    for start in range(0, len(items), 40):  # 명령줄 길이 제한
+        if cancelled():
+            break
+        batch = items[start:start + 40]
+        args = [x for p, title, album in batch for x in (os.path.realpath(p), title, album)]
+        try:
+            lines = _run_script(PRELOOKUP_SCRIPT, args,
+                                lambda n, s=start: progress(s + n, len(items), "Music에서 곡 찾는 중"), cancelled)
+        except MusicError:
+            return out
+        for parts in _tagged(lines, "LOCALTAG_RESULT:"):
+            if len(parts) >= 2 and parts[1]:
+                out[parts[0]] = parts[1]
+    return out
+
+
 # persistent ID 로 곡을 찾아 현재 Music에 보이는 정보를 읽거나(read), 다시 새로 읽게 한다(refresh).
 #   read:    인자 = read, <pid>, <pid>, …
 #   refresh: 인자 = refresh, <최소 대기 칸>, <최대 대기 칸>, <pid>, <제목>, <앨범>, <pid>, <제목>, <앨범>, …
@@ -107,6 +168,8 @@ on run arguments
                         refresh t
                         set lastLoc to ""
                         set steady to 0
+                        set seenTick to 0
+                        set usedTick to maxTicks
                         repeat with tick from 1 to maxTicks
                             delay 0.2
                             set curLoc to ""
@@ -119,11 +182,15 @@ on run arguments
                                 set steady to 0
                             end if
                             set lastLoc to curLoc
-                            if tick >= minTicks and steady >= 2 then
-                                if wantName is "" and wantAlbum is "" then exit repeat
-                                if (name of t as text) is wantName and (album of t as text) is wantAlbum then exit repeat
+                            set isMatch to (wantName is "" and wantAlbum is "") or ((name of t as text) is wantName and (album of t as text) is wantAlbum)
+                            if isMatch and seenTick is 0 then set seenTick to tick
+                            if tick >= minTicks and steady >= 2 and isMatch then
+                                set usedTick to tick
+                                exit repeat
                             end if
                         end repeat
+                        -- 진단: 새 정보가 보인 시점 · 다음 곡으로 넘어간 시점 (칸 = 0.2초)
+                        log "LOCALTAG_TIMING:" & pid & tab & seenTick & tab & usedTick & tab & (name of t as text) & tab & (album of t as text)
                     end if
                     set loc to ""
                     try
@@ -467,7 +534,7 @@ def _lookup(cur, keys, progress, cancelled):
 
 
 def refresh(paths, progress=lambda *_: None, cancelled=lambda: False, expected=None, rounds=3,
-            relocate=None, pace=DEFAULT_PACE, file_values=None):
+            relocate=None, pace=DEFAULT_PACE, file_values=None, known_pids=None):
     """바꾼 파일을 Music에서 다시 읽게 하고, 실제로 반영됐는지 확인한다.
 
     1) 경로로 곡을 모두 찾아 persistent ID 를 얻는다 (아직 아무것도 반영하지 않음)
@@ -477,6 +544,8 @@ def refresh(paths, progress=lambda *_: None, cancelled=lambda: False, expected=N
     expected: {경로: (제목, 앨범)}
     relocate: 옮겨진 파일의 새 경로를 찾는 함수 ([경로] → {옛 경로: 새 경로}). 찾기 재시도 전에 부른다.
     pace: 반영 속도 (PACES 의 키)
+    known_pids: {경로: persistent ID} — 저장 전에 prelookup 으로 찾아 둔 곡. 이 곡들은 경로로 다시 찾지 않는다
+        (경로로 찾으면 Music 이 바뀐 파일을 한꺼번에 다시 읽는다).
     file_values: 경로 → 파일에 지금 들어 있는 (제목, 앨범). Music 에 보이는 값이 기대와 다를 때, 파일도 이미
         다른 값으로 바뀌었으면(반영하는 사이 Music 에서 직접 고친 경우) 다시 반영하지 않고 그 값을 따른다.
     """
@@ -492,8 +561,10 @@ def refresh(paths, progress=lambda *_: None, cancelled=lambda: False, expected=N
     ensure_access()
 
     # ---- 1) 찾기 (실패하면 새 위치를 확인하고 잠시 뒤 다시)
-    pid_of, bad = {}, {}
-    todo = list(keys)
+    known = {os.path.realpath(k): v for k, v in (known_pids or {}).items()}
+    pid_of = {k: known[k] for k in keys if k in known}
+    bad = {}
+    todo = [k for k in keys if k not in pid_of]
     for attempt in range(3):
         if not todo or cancelled():
             break

@@ -841,6 +841,9 @@ class MainWindow(QMainWindow):
         entry = UndoEntry(label)
         # 앨범을 이루는 값이 바뀌면 Music 앨범 화면이 갈라져 보일 수 있다 → 반영 뒤 Music 다시 켜기
         entry.album_change = any(p.remove_tags or set(p.changes) & ALBUM_KEYS for p in plans)
+        # Music 에 반영할 거라면 파일을 바꾸기 전에 곡 ID 를 찾아 둔다 (바꾼 뒤 경로로 찾으면 Music 이 몰아서 다시 읽는다)
+        music_on = IS_MAC and self.settings.value("music_auto", False, bool)
+        pids = self._music_prelookup([p.file for p in plans if p.touches_tags or p.new_path]) if music_on else {}
         job = None
         if self.backup_enabled:
             try:
@@ -873,6 +876,7 @@ class MainWindow(QMainWindow):
                     move_file(cur_path, p.new_path)
                     cur_path = p.new_path
                 entry.items.append(UndoItem(old_path, cur_path, held[0] if held else None))
+                entry.items[-1].pid = pids.get(os.path.realpath(old_path))
                 held.clear()
                 if bentry is not None:
                     job.after(bentry, cur_path)
@@ -905,9 +909,10 @@ class MainWindow(QMainWindow):
                 pass
         if entry.items:
             self._push_undo(entry)
-            if IS_MAC and self.settings.value("music_auto", False, bool):
+            if music_on:
                 changed = [i.new_path for i in entry.items]
-                self._music_refresh_paths(changed, modal=False, album_change=entry.album_change)
+                known = {i.new_path: i.pid for i in entry.items if getattr(i, "pid", None)}
+                self._music_refresh_paths(changed, modal=False, album_change=entry.album_change, known_pids=known)
         if refresh_panel:
             self.panel.set_files(self.selected_files())
         self._update_status()
@@ -989,8 +994,9 @@ class MainWindow(QMainWindow):
         bad = {p for p, _ in failed}
         restored_paths = [i.old_path for i in entry.items if i.new_path not in bad and os.path.exists(i.old_path)]
         if IS_MAC and restored_paths and self.settings.value("music_auto", False, bool):
+            known = {i.old_path: i.pid for i in entry.items if getattr(i, "pid", None)}
             self._music_refresh_paths(restored_paths, modal=False,
-                                      album_change=getattr(entry, "album_change", True))
+                                      album_change=getattr(entry, "album_change", True), known_pids=known)
 
     # ------------------------------------------------------------ 변환기 · 액션
     def _files_for_command(self):
@@ -1218,7 +1224,30 @@ class MainWindow(QMainWindow):
         if files:
             self._music_refresh_paths([f.path for f in files], modal=True, album_change=True)
 
-    def _music_refresh_paths(self, paths, modal=True, album_change=False):
+    def _music_prelookup(self, files):
+        """파일을 바꾸기 전에 Music 곡 ID 를 찾는다 (지금 제목·앨범으로). {실제 경로: pid}"""
+        items = [(f.path, f.get("title").split("\\\\")[0] or f.stem, f.get("album").split("\\\\")[0]) for f in files]
+        if not items:
+            return {}
+        prog = None
+        if len(items) > 10:
+            prog = QProgressDialog("Music에서 곡 찾는 중…", None, 0, len(items), self)
+            prog.setWindowModality(Qt.WindowModal)
+            prog.setMinimumDuration(500)
+
+        def report(cur, total, msg):
+            if prog:
+                prog.setValue(min(cur, total))
+                QApplication.processEvents()
+        try:
+            return music.prelookup(items, report)
+        except Exception:
+            return {}  # 못 찾으면 반영할 때 예전 방식으로 찾는다
+        finally:
+            if prog:
+                prog.close()
+
+    def _music_refresh_paths(self, paths, modal=True, album_change=False, known_pids=None):
         if getattr(self, "_music_busy", False):
             self.statusBar().showMessage("Music 작업이 이미 진행 중입니다.", 4000)
             return
@@ -1306,8 +1335,9 @@ class MainWindow(QMainWindow):
                 if p in moved:
                     inode[os.path.realpath(moved[p])] = inode.get(os.path.realpath(p), (0, 0))
             exp = {moved.get(p, p): v for p, v in expected.items()}
+            known = {moved.get(p, p): pid for p, pid in (known_pids or {}).items()}
             res = music.refresh(now, prog, cancelled, exp, relocate=relocate, pace=pace,
-                                file_values=file_values)
+                                file_values=file_values, known_pids=known)
             # music.refresh 의 키는 '반영 시작 때 경로'이므로 목록의 원래 경로로 되돌린다
             orig = {os.path.realpath(moved.get(p, p)): os.path.realpath(p) for p in paths}
             final = {}
