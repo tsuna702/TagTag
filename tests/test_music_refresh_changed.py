@@ -7,14 +7,14 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from harness import check, finish  # noqa: E402
+from harness import RUN, check, finish  # noqa: E402
 
 from localtag import music  # noqa: E402
 from localtag.tasks import run_task  # noqa: E402
 
 music.ensure_access = lambda *a, **k: None
 music.time.sleep = lambda s: None
-A, B = os.path.realpath("/tmp/lt-a.mp3"), os.path.realpath("/tmp/lt-b.mp3")
+A, B = (os.path.realpath(os.path.join(RUN, n)) for n in ("lt-a.mp3", "lt-b.mp3"))  # 이번 실행 폴더 안에
 for p in (A, B):
     open(p, "wb").close()
 music._lookup = lambda cur, keys, progress, cancelled: ({k: ("PA" if k == A else "PB") for k in keys}, {})
