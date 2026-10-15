@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
 )
 
 from .model import fmt_size
+from .osutil import keys
 from .tagio import FIELD_LABELS, FIELDS, SEP, Picture, guess_mime
 
 THUMB_CACHE = 16
@@ -160,7 +161,7 @@ class TagPanel(QWidget):
         self.btn_add.setToolTip("이미지 파일로 커버 바꾸기")
         self.btn_add.clicked.connect(self.choose_cover)
         self.btn_find = QPushButton("찾기…")
-        self.btn_find.setToolTip("Apple Music 검색 · YouTube 썸네일 · 크기 조정 (⇧⌘A)")
+        self.btn_find.setToolTip(keys("Apple Music 검색 · YouTube 썸네일 · 크기 조정 (⇧⌘A)"))
         self.btn_find.clicked.connect(self.artworkRequested)
         self.btn_del = QPushButton("삭제")
         self.btn_del.clicked.connect(self.remove_cover)

@@ -1,6 +1,6 @@
 # Windows 판 만들기
 
-Windows PC 에서 `windows` 브랜치로 작업한다. 기준 버전은 0.9.0 (macOS 판).
+Windows PC 에서 `windows` 브랜치로 작업한다. 기준 버전은 0.9.1 (macOS·Windows 합침).
 화면(PySide6)과 태그 읽기·쓰기(mutagen)는 그대로 Windows 에서 돈다. 손볼 곳은 아래 맥 전용 부분이다.
 
 ## 시작하기 (Windows PC)
@@ -40,6 +40,12 @@ py -3 -m venv .venv
 | 메뉴 | macOS 는 About·종료가 앱 메뉴로 옮겨짐 (`AboutRole`, `QuitRole`) | Windows 는 그대로 파일 메뉴 / 도움말 메뉴에 둔다 |
 | 폰트 | 시스템 기본 | 한글·일본어가 섞여 보이므로 `Malgun Gothic` / `Yu Gothic UI` 확인 |
 
+**진행 (2026-10-14, Windows PC):** 위 표를 거의 다 했다. 운영체제별 도우미는 `localtag/osutil.py`
+(`IS_MAC`·`IS_WIN`, `reveal`, `open_folder`, `keys()` — ⌘ 기호를 Ctrl 표기로). 표에 없던 것도 고쳤다:
+Windows 에는 `os.pread`/`os.pwrite` 가 없고, `os.open` 은 `O_BINARY` 없이 텍스트 모드로 열며, 폴더 fsync 가 안 된다
+(`safewrite.py`). 목록에서 제거는 Windows 에서 Delete 키. `make_icon.py` 가 `LocalTag.ico` 도 만든다.
+남은 것: `filetrack.py` 를 실제 옮긴 파일로 확인, `_version.py` 는 2단계 빌드에서 만든다. 맥에서 smoke PASS 확인.
+
 **끝났는지 확인:** `tests\smoke.py` 가 Windows 에서 PASS. 맥에서도 PASS 여야 한다 (맥 쪽은 사용자가 맥에서 확인하거나 다음에 맥 세션에서).
 
 ## 2단계: 빌드
@@ -50,6 +56,10 @@ py -3 -m venv .venv
   - 버전은 macOS spec 의 `CFBundleShortVersionString` 을 읽어 같은 번호를 쓴다 (버전 번호는 한 곳에서만 올린다).
 - `build_win.ps1`: venv 만들기 → 설치 → pyinstaller → `dist\LocalTag-<버전>-windows.zip`.
 
+**진행 (2026-10-14):** 됐다. `.\build_win.ps1` → `dist\LocalTag\LocalTag.exe` (폴더 약 64MB, zip 약 27MB).
+spec 이 빌드 때 `localtag/_version.py`(저장소에 넣지 않음)와 exe 버전 정보(탐색기 속성 → 자세히)를 만든다.
+Windows DLL 이름은 `Qt6Quick.dll` 처럼 `Qt6` 으로 시작해서 DROP 목록을 따로 두었고, `opengl32sw.dll`(약 20MB)도 뺀다.
+
 ## 3단계: 릴리스
 
 버전 번호는 macOS 와 같이 쓴다 (`packaging/LocalTag.spec`). 두 가지 중 하나 — 사용자와 정한다:
@@ -58,6 +68,18 @@ py -3 -m venv .venv
   Windows zip 을 붙이고, 없으면 새로 만든다 (노트는 release.sh 와 같은 방식, 설치 안내만 Windows 용).
 - **B. GitHub Actions:** `.github/workflows/windows.yml` — 태그가 올라오면 windows-latest 에서 빌드해 릴리스에 붙인다.
   저장소에 워크플로를 올리는 일이라 **사용자에게 먼저 묻는다.**
+
+**정함 (2026-10-14): A.** `.\release_win.ps1` — windows 브랜치·커밋 안 한 변경 없음 확인 → 빌드 → push →
+같은 태그가 있으면 zip 을 붙이고 노트 끝에 "Windows 판"(그 태그 이후 windows 브랜치 커밋)과 설치 안내를 더한다.
+이미 Windows zip 이 붙어 있으면 멈춘다. 태그가 없으면 windows 브랜치를 대상으로 새로 만든다
+(그러면 맥의 release.sh 는 같은 태그가 있어 멈추므로, 보통은 맥에서 먼저 릴리스하고 Windows 를 붙인다).
+필요: `gh` (winget install GitHub.cli) 와 사용자가 직접 한 `gh auth login`.
+
+**릴리스 기록:** v0.8.2 — macOS 릴리스에 Windows zip 을 붙임. v0.8.3 — Windows 만 (windows 브랜치에서 새로 만듦,
+옮겨진 파일 찾기 고침). v0.9.0 — macOS 만 (맥에서 windows 를 합치기 전에 나감: 태그 가져오기·앨범 점검·칸에서 고치기).
+v0.9.1 — 맥에서 `windows` 를 `main` 으로 합친 첫 릴리스 (맥에서 테스트 모두 PASS). **이 릴리스에 Windows zip 이 아직 없다**
+→ Windows PC 에서 `main` 을 받아 `.\release_win.ps1` 로 v0.9.1 에 붙인다. 이제 두 브랜치는 같으니, 앞으로는 어느 쪽에서든
+릴리스하기 전에 `git fetch` 로 다른 쪽 커밋을 먼저 합친다.
 
 설치 안내 (릴리스 노트): zip 을 풀고 `LocalTag.exe` 실행. 서명하지 않은 앱이라 처음에 "Windows의 PC 보호" 가 뜨면
 **추가 정보 → 실행**.

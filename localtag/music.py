@@ -12,6 +12,7 @@ import os
 import plistlib
 import re
 import subprocess
+import sys
 import tempfile
 import time
 import unicodedata
@@ -699,6 +700,8 @@ def _drag_board():
 
 
 def drag_has_music() -> bool:
+    if sys.platform != "darwin":
+        return False
     try:
         o, board = _drag_board()
         types = {o.pystr(t) for t in o.array(o.send(board, "types"))}

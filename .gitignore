@@ -6,3 +6,4 @@ build/
 dist/
 packaging/*.iconset/
 tests/runs/
+localtag/_version.py

@@ -5,7 +5,7 @@ import os
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 
-from PySide6.QtCore import QSize, Qt, QThread, Signal
+from PySide6.QtCore import QSize, QStandardPaths, Qt, QThread, Signal
 from PySide6.QtGui import QIcon, QImage, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QHBoxLayout, QHeaderView,
@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import extract as ex
+from .osutil import IS_MAC, REVEAL_LABEL, reveal
 
 THUMB = 110
 WORKERS = 6
@@ -22,14 +23,16 @@ MARK = {"done": "✅", "failed": "❌", "skipped": "➖", "duplicate": "🔁"}
 
 def default_folder() -> str:
     """앨범아트 추출기 앱에서 쓰던 저장 폴더가 있으면 그대로, 없으면 사진 폴더 아래."""
-    try:
-        r = subprocess.run(["/usr/bin/defaults", "read", "local.albumart-extractor", "saveDir"],
-                           capture_output=True, text=True, timeout=5)
-        if r.returncode == 0 and os.path.isdir(r.stdout.strip()):
-            return r.stdout.strip()
-    except (OSError, subprocess.SubprocessError):
-        pass
-    return os.path.join(os.path.expanduser("~/Pictures"), "앨범아트")
+    if IS_MAC:
+        try:
+            r = subprocess.run(["/usr/bin/defaults", "read", "local.albumart-extractor", "saveDir"],
+                               capture_output=True, text=True, timeout=5)
+            if r.returncode == 0 and os.path.isdir(r.stdout.strip()):
+                return r.stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            pass
+    pictures = QStandardPaths.writableLocation(QStandardPaths.PicturesLocation) or os.path.expanduser("~/Pictures")
+    return os.path.join(pictures, "앨범아트")
 
 
 class Job(QThread):
@@ -96,7 +99,10 @@ class ExtractDialog(QDialog):
         self.tabs.addTab(self._library_tab(), "내 보관함")
         self.tabs.addTab(self._files_tab(), "목록의 곡")
         self.tabs.addTab(self._youtube_tab(), "YouTube")
-        self.tabs.setCurrentIndex(self.settings.value("extract/tab", 0, int))
+        if not IS_MAC:  # Music 보관함은 macOS 에서만 — 탭 번호는 그대로 두고 숨긴다
+            self.tabs.setTabVisible(1, False)
+        tab = self.settings.value("extract/tab", 0, int)
+        self.tabs.setCurrentIndex(0 if tab == 1 and not IS_MAC else tab)
         self.tabs.currentChanged.connect(self._tab_changed)
         v.addWidget(self.tabs, 2)
 
@@ -116,7 +122,7 @@ class ExtractDialog(QDialog):
         self.title = QLabel()
         self.title.setStyleSheet("font-weight: bold;")
         row.addWidget(self.title, 1)
-        self.reveal_btn = QPushButton("Finder에서 보기")
+        self.reveal_btn = QPushButton(REVEAL_LABEL)
         self.reveal_btn.clicked.connect(self._reveal)
         self.reveal_btn.setEnabled(False)
         row.addWidget(self.reveal_btn)
@@ -591,7 +597,7 @@ class ExtractDialog(QDialog):
 
     def _reveal(self):
         if self.last_out:
-            subprocess.run(["open", "-R", self.last_out], check=False)
+            reveal(self.last_out)
 
     def closeEvent(self, e):
         if self.job:

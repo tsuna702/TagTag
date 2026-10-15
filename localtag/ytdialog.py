@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QPushButton
 
 from .actions import DEFAULTS, YT_ORDERS
 from .converters import ConverterDialog
+from .osutil import keys
 from .plan import Plan
 from .ytclean import clean, compile_rx
 
@@ -54,11 +55,11 @@ class YtCleanDialog(ConverterDialog):
         row = QHBoxLayout()
         flip = QPushButton("↔ 고른 줄 아티스트·제목 뒤바꾸기")
         flip.setShortcut(QKeySequence("Ctrl+R"))
-        flip.setToolTip("표에서 고른 줄의 새 아티스트와 새 제목을 맞바꿉니다 (⌘R)")
+        flip.setToolTip(keys("표에서 고른 줄의 새 아티스트와 새 제목을 맞바꿉니다 (⌘R)"))
         flip.clicked.connect(lambda: self._toggle(self.flipped))
         skip = QPushButton("고른 줄 빼기 / 다시 넣기")
         skip.setShortcut(QKeySequence("Ctrl+D"))
-        skip.setToolTip("고른 줄은 적용하지 않습니다. 한 번 더 누르면 다시 넣습니다 (⌘D)")
+        skip.setToolTip(keys("고른 줄은 적용하지 않습니다. 한 번 더 누르면 다시 넣습니다 (⌘D)"))
         skip.clicked.connect(lambda: self._toggle(self.skipped))
         for b in (flip, skip):
             b.setAutoDefault(False)

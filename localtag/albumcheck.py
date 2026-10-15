@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem, QVBoxLayout,
 )
 
+from .osutil import keys
 from .plan import Plan
 from .tagio import AudioFile
 
@@ -117,11 +118,11 @@ def check_albums(files) -> list[AlbumReport]:
         dup = sorted(f"{d}-{t}" if d != "1" else t for (d, t), n in seen.items() if n > 1)
         if dup:
             issues.append(Issue("_dup", "트랙 번호 겹침: " + ", ".join(dup), members, fixable=False, default_on=False,
-                                note="자동 번호 매기기(⌘K)로 고치세요"))
+                                note=keys("자동 번호 매기기(⌘K)로 고치세요")))
         missing = [f for f in members if not _number(f, "track")]
         if missing:
             issues.append(Issue("_missing", f"트랙 번호 없는 곡 {len(missing)}개", missing, fixable=False,
-                                default_on=False, note="자동 번호 매기기(⌘K)로 고치세요"))
+                                default_on=False, note=keys("자동 번호 매기기(⌘K)로 고치세요")))
         if issues:
             name = Counter(f.get("album") for f in members).most_common(1)[0][0]
             out.append(AlbumReport(name, members, issues))

@@ -13,7 +13,7 @@ MEDIA_DIRS = ("Media", "Media.localized", "Music Media", "Music Media.localized"
 
 def _media_root(path):
     for name in MEDIA_DIRS:
-        i = path.find("/" + name + "/")
+        i = path.replace(os.sep, "/").find("/" + name + "/")  # Windows 는 '\' 구분 (길이는 같다)
         if i >= 0:
             return path[:i + len(name) + 1]
     return None
@@ -46,6 +46,8 @@ def _scan(root, missing, found):
                     if trust and e.inode() not in inodes:
                         continue
                     st = e.stat(follow_symlinks=False)
+                    if not st.st_ino:  # Windows: scandir 의 stat 에는 디스크·파일 번호가 비어 있다
+                        st = os.stat(e.path, follow_symlinks=False)
                     if trust is None:
                         trust = st.st_ino == e.inode()
                 except OSError:

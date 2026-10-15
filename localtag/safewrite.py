@@ -10,15 +10,35 @@ from __future__ import annotations
 
 import ctypes
 import os
+import shutil
 import stat
 import struct
 import subprocess
+import sys
 import uuid
 
 import mutagen
 
+IS_MAC = sys.platform == "darwin"
+IS_WIN = sys.platform == "win32"
+
 SF_DATALESS = 0x40000000  # iCloud 등에 있고 아직 내려받지 않은 파일
+RECALL_ON_DATA_ACCESS = 0x400000  # Windows: OneDrive "온라인 전용" 파일
 STAGE_PREFIX = ".localtag-"
+
+# Windows 는 os.open 이 기본으로 텍스트 모드라 줄 끝을 바꾼다 → 늘 바이너리로
+O_BINARY = getattr(os, "O_BINARY", 0)
+
+if hasattr(os, "pread"):
+    _pread, _pwrite = os.pread, os.pwrite
+else:  # Windows 에는 pread/pwrite 가 없다 — 한 fd 를 한 스레드에서만 쓰므로 lseek 로 충분
+    def _pread(fd, n, off):
+        os.lseek(fd, off, os.SEEK_SET)
+        return os.read(fd, n)
+
+    def _pwrite(fd, data, off):
+        os.lseek(fd, off, os.SEEK_SET)
+        return os.write(fd, data)
 
 
 class SafeWriteError(Exception):
@@ -38,6 +58,8 @@ def check_writable(path: str):
         raise SafeWriteError("일반 파일만 편집할 수 있습니다. 링크 파일은 제외됩니다.")
     if getattr(st, "st_flags", 0) & SF_DATALESS:
         raise SafeWriteError("아직 내려받지 않은 iCloud 파일입니다. Finder에서 먼저 내려받아 주세요.")
+    if getattr(st, "st_file_attributes", 0) & RECALL_ON_DATA_ACCESS:
+        raise SafeWriteError("아직 내려받지 않은 OneDrive 파일입니다. 탐색기에서 '항상 이 장치에 유지'로 먼저 내려받아 주세요.")
     if not os.access(path, os.W_OK):
         raise SafeWriteError("읽기 전용 파일입니다.")
     return st
@@ -45,9 +67,11 @@ def check_writable(path: str):
 
 def is_dataless(path: str) -> bool:
     try:
-        return bool(getattr(os.lstat(path), "st_flags", 0) & SF_DATALESS)
+        st = os.lstat(path)
     except OSError:
         return False
+    return bool(getattr(st, "st_flags", 0) & SF_DATALESS
+                or getattr(st, "st_file_attributes", 0) & RECALL_ON_DATA_ACCESS)
 
 
 CHUNK = 1024 * 1024
@@ -57,18 +81,23 @@ CHUNK = 1024 * 1024
 # (어느 한쪽을 고치면 그 부분만 새로 저장되므로 원본과 사본은 서로 영향을 주지 않는다).
 COPYFILE_ALL = 0xF
 COPYFILE_CLONE = 1 << 24
-try:
-    _copyfile = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True).copyfile
-    _copyfile.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_uint32]
-    _copyfile.restype = ctypes.c_int
-except (OSError, AttributeError):
-    _copyfile = None
+_copyfile = None
+if IS_MAC:
+    try:
+        _copyfile = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True).copyfile
+        _copyfile.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_uint32]
+        _copyfile.restype = ctypes.c_int
+    except (OSError, AttributeError):
+        _copyfile = None
 
 
 def copy_preserving(src: str, dst: str):
     """메타데이터까지 그대로 복사한다. 같은 APFS 디스크면 복제본(clone)으로 즉시 만든다."""
     if os.path.lexists(dst):
         raise FileExistsError(17, "이미 같은 이름의 파일이 있습니다", dst)
+    if not IS_MAC:
+        shutil.copy2(src, dst)  # 내용과 시각
+        return
     if _copyfile is not None:
         if _copyfile(os.fsencode(src), os.fsencode(dst), None, COPYFILE_ALL | COPYFILE_CLONE) == 0:
             return
@@ -81,7 +110,9 @@ def copy_preserving(src: str, dst: str):
 
 
 def _fsync(path: str):
-    fd = os.open(path, os.O_RDONLY)
+    if IS_WIN and os.path.isdir(path):
+        return  # Windows 는 폴더를 열어 fsync 할 수 없다 (NTFS 가 이름 바꾸기를 기록해 둔다)
+    fd = os.open(path, os.O_RDONLY | O_BINARY)
     try:
         os.fsync(fd)
     finally:
@@ -157,8 +188,8 @@ def _same_bytes(fa, fb, ra, rb) -> bool:
         off = 0
         while off < n:
             k = min(CHUNK, n - off)
-            a = os.pread(fa, k, sa + off)
-            if len(a) != k or a != os.pread(fb, k, sb + off):
+            a = _pread(fa, k, sa + off)
+            if len(a) != k or a != _pread(fb, k, sb + off):
                 return False
             off += k
     return True
@@ -172,7 +203,7 @@ def same_payload(original: str, modified: str) -> bool | None:
     rb = payload_regions(modified)
     if rb is None or [n for _, n in ra] != [n for _, n in rb]:
         return False
-    fa, fb = os.open(original, os.O_RDONLY), os.open(modified, os.O_RDONLY)
+    fa, fb = os.open(original, os.O_RDONLY | O_BINARY), os.open(modified, os.O_RDONLY | O_BINARY)
     try:
         return _same_bytes(fa, fb, ra, rb)
     finally:
@@ -189,6 +220,14 @@ def _length(path):
 
 
 AUDIO_CHANGED = "오디오 데이터 검증에 실패했습니다. 원본은 그대로입니다."
+IN_USE = "다른 프로그램(플레이어 등)이 파일을 사용 중이라 저장하지 못했습니다. 원본은 그대로입니다."
+
+
+def error_text(e: Exception) -> str:
+    """사용자에게 보일 오류 문구. Windows 공유 위반(백업·이름 바꾸기 등 어디서 나든)은 알기 쉬운 말로."""
+    if getattr(e, "winerror", 0) == 32:
+        return IN_USE
+    return str(e)
 
 
 def safe_modify(path: str, fn, enabled: bool = True, keep_mtime: bool = False, inspect=None):
@@ -209,7 +248,12 @@ def safe_modify(path: str, fn, enabled: bool = True, keep_mtime: bool = False, i
     keep_stage = False
     result = None
     try:
-        copy_preserving(path, stage)
+        try:
+            copy_preserving(path, stage)
+        except PermissionError as e:
+            if IS_WIN and getattr(e, "winerror", 0) == 32:  # 공유 위반: 다른 프로그램이 열어 둠
+                raise SafeWriteError(IN_USE) from e
+            raise
         before_len = fn(stage)
         before_len = round(float(before_len), 2) if isinstance(before_len, (int, float)) else _length(path)
         if inspect:
@@ -255,10 +299,10 @@ def _differing_chunks(s, d, size, protect):
     chunks = []
     off = 0
     while off < size:
-        a = os.pread(s, CHUNK, off)
+        a = _pread(s, CHUNK, off)
         if not a:
             raise SafeWriteError("작업 사본을 읽지 못했습니다. 원본은 그대로입니다.")
-        b = os.pread(d, len(a), off)
+        b = _pread(d, len(a), off)
         if a != b:
             end = off + len(a)
             for start, n in protect or ():
@@ -280,10 +324,14 @@ def write_back(src: str, dst: str, protect=None):
     protect: 바뀌면 안 되는 위치 [(시작, 길이)] — 비교할 때 다르면 아무것도 쓰지 않고 SafeWriteError.
     쓰는 도중에 실패하면 사본으로 원본을 교체해 반쯤 쓰인 파일이 남지 않게 한다.
     """
-    s = os.open(src, os.O_RDONLY)
+    s = os.open(src, os.O_RDONLY | O_BINARY)
     try:
         try:
-            d = os.open(dst, os.O_RDWR)
+            d = os.open(dst, os.O_RDWR | O_BINARY)
+        except PermissionError as e:
+            if IS_WIN:  # 다른 프로그램이 열어 둔 파일은 교체도 안 된다
+                raise SafeWriteError(IN_USE) from e
+            d = None
         except OSError:
             d = None
         if d is not None:
@@ -295,16 +343,16 @@ def write_back(src: str, dst: str, protect=None):
                     raise SafeWriteError(f"원본과 비교하지 못했습니다. 원본은 그대로입니다.\n{e}") from e
                 try:
                     for off, n in chunks:
-                        a = os.pread(s, n, off)
+                        a = _pread(s, n, off)
                         done = 0
                         while done < n:
-                            done += os.pwrite(d, a[done:], off + done)
+                            done += _pwrite(d, a[done:], off + done)
                     if os.fstat(d).st_size != size:
                         os.ftruncate(d, size)
                     os.fsync(d)
                     # 쓴 부분을 다시 읽어 확인 (나머지는 쓰기 전에 같다는 것을 확인했다)
                     for off, n in chunks:
-                        if os.pread(d, n, off) != os.pread(s, n, off):
+                        if _pread(d, n, off) != _pread(s, n, off):
                             raise SafeWriteError("덮어쓴 내용 확인에 실패했습니다.")
                     if os.fstat(d).st_size != size:
                         raise SafeWriteError("덮어쓴 파일 크기가 다릅니다.")

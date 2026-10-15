@@ -9,6 +9,8 @@ Mp3tag 를 본뜬 음악 태그 편집기. Python 3 + PySide6(Qt) + mutagen. Git
 - `windows` — Windows 판 작업 (Windows PC 에서). 계획과 체크리스트: **[docs/WINDOWS.md](docs/WINDOWS.md)**.
   macOS 판이 계속 그대로 돌아가야 한다. 맥 전용 부분은 지우지 말고 운영체제에 따라 갈라 둔다.
   `main` 에 새 커밋이 생기면 `windows` 로 merge 해서 따라간다.
+  **어느 쪽에서든 릴리스하기 전에 `git fetch` 로 다른 브랜치의 새 커밋을 확인하고 먼저 합친다**
+  (두 PC 가 따로 릴리스해서 버전이 엇갈린 적이 있다 — 0.9.0 은 Windows 쪽 0.8.3 을 합치지 않고 나갔다).
 
 ## 늘 지키는 규칙
 
@@ -17,7 +19,7 @@ Mp3tag 를 본뜬 음악 태그 편집기. Python 3 + PySide6(Qt) + mutagen. Git
    - 릴리스 노트는 지난 태그 이후 **커밋 제목**으로 자동으로 만든다 → 제목을 사용자가 읽을 수 있게 쓴다
      (예: `태그 비교(⇧⌘D) 추가 — 고른 곡을 나란히 놓고 다른 줄을 노란색으로 (0.8.0)`).
    - macOS: `./release.sh` (빌드 → zip → `gh release create`). 커밋 안 한 변경이 있거나 같은 태그가 있으면 멈춘다.
-   - Windows: 릴리스 방식은 docs/WINDOWS.md 의 "릴리스" 를 따른다 (아직 만드는 중).
+   - Windows: `.\release_win.ps1` (windows 브랜치에서. 같은 버전 릴리스에 Windows zip 을 붙인다 — docs/WINDOWS.md 의 "릴리스").
    - 커밋 끝에 `Co-Authored-By:` 줄을 붙인다.
 2. **테스트는 사용자의 실제 환경을 건드리지 않는다.** `tests/harness.py` 를 쓴다.
    - 설정은 임시 INI 로 바꿔 끼운다. 실제 설정(macOS plist, Windows 레지스트리 `HKCU\Software\LocalTag`)에 `clear()` 금지.

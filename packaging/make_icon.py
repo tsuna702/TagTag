@@ -1,4 +1,4 @@
-"""앱 아이콘(LocalTag.icns) 그리기: 둥근 사각형 위에 태그 모양 + 음표."""
+"""앱 아이콘(LocalTag.icns · Windows 용 LocalTag.ico) 그리기: 둥근 사각형 위에 태그 모양 + 음표."""
 import os
 import subprocess
 import sys
@@ -50,8 +50,33 @@ def draw(size: int) -> QImage:
     return img
 
 
+def write_ico(out_ico, sizes=(16, 24, 32, 48, 64, 128, 256)):
+    """Windows 아이콘: 크기별 PNG 를 담은 .ico (Vista 이후 형식)."""
+    import struct
+    from PySide6.QtCore import QBuffer, QByteArray, QIODevice
+    pngs = []
+    for size in sizes:
+        data = QByteArray()
+        buf = QBuffer(data)
+        buf.open(QIODevice.WriteOnly)
+        draw(size).save(buf, "PNG")
+        pngs.append((size, bytes(data)))
+    head = struct.pack("<HHH", 0, 1, len(pngs))
+    offset = 6 + 16 * len(pngs)
+    entries, body = b"", b""
+    for size, png in pngs:
+        dim = 0 if size >= 256 else size
+        entries += struct.pack("<BBBBHHII", dim, dim, 0, 0, 1, 32, len(png), offset + len(body))
+        body += png
+    with open(out_ico, "wb") as f:
+        f.write(head + entries + body)
+
+
 def main(out_icns):
     app = QGuiApplication(sys.argv)
+    if sys.platform == "win32":  # iconutil 이 없으므로 .ico 만
+        write_ico(out_icns.replace(".icns", ".ico"))
+        return
     iconset = out_icns.replace(".icns", ".iconset")
     os.makedirs(iconset, exist_ok=True)
     for base in (16, 32, 128, 256, 512):
@@ -59,6 +84,7 @@ def main(out_icns):
         draw(base * 2).save(os.path.join(iconset, f"icon_{base}x{base}@2x.png"))
     subprocess.run(["iconutil", "-c", "icns", iconset, "-o", out_icns], check=True)
     draw(512).save(out_icns.replace(".icns", ".png"))
+    write_ico(out_icns.replace(".icns", ".ico"))
 
 
 if __name__ == "__main__":
