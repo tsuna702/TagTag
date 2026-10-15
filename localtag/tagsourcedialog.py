@@ -73,11 +73,14 @@ class TagSourceDialog(QDialog):
         self.results.setSelectionMode(QTableWidget.SingleSelection)
         self.results.setWordWrap(False)
         rh = self.results.horizontalHeader()
-        rh.setSectionResizeMode(QHeaderView.Interactive)
-        rh.setSectionResizeMode(0, QHeaderView.Stretch)  # 앨범 칸이 남는 폭을 차지 → 연도·곡 수·나라가 늘 보임
-        for c, w in enumerate((0, 110, 46, 46, 56, 50)):
-            if c:
-                self.results.setColumnWidth(c, w)
+        rh.setSectionResizeMode(QHeaderView.Interactive)  # 칸 경계를 끌어 너비 조정
+        rh.setStretchLastSection(True)
+        rh.setMinimumSectionSize(30)
+        for c, w in enumerate((230, 110, 46, 46, 56, 50)):
+            self.results.setColumnWidth(c, w)
+        state = settings.value("source/results_header")
+        if state is not None:
+            rh.restoreState(state)
         self.results.currentCellChanged.connect(lambda row, *_: self._pick_release(self._release_row(row)))
         split.addWidget(self.results)
         right = QWidget()
@@ -174,6 +177,10 @@ class TagSourceDialog(QDialog):
             it.setToolTip(f.path)
             self.table.setItem(i, 0, it)
         self._refresh_rows()
+
+    def done(self, r):
+        self.settings.setValue("source/results_header", self.results.horizontalHeader().saveState())
+        super().done(r)
 
     # ------------------------------------------------------------ 검색
     def search(self):

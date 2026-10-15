@@ -118,6 +118,9 @@ def run_source(self):
     self.results.setCurrentCell(0, 0)
     check(self.results.item(0, 0).text() == "먼저 앨범" and picked[-1] == "b", f"연도로 정렬 뒤 고르기 {picked}")
     del self._pick_release
+    rh = self.results.horizontalHeader()
+    check(all(rh.sectionResizeMode(c) == rh.ResizeMode.Interactive for c in range(6)), "검색 결과 칸 너비 조정 가능")
+    self.results.setColumnWidth(0, 321)
     self._set_release(rel)
     check(self.preview.text() == "커버 없음", "커버 없는 앨범은 '커버 없음'")
     from PySide6.QtCore import QBuffer
@@ -157,6 +160,9 @@ def run_source(self):
 TagSourceDialog.exec = run_source
 w.tag_source()
 app.processEvents()
+again = TagSourceDialog(w, list(w.model.files), w.settings)
+check(again.results.columnWidth(0) == 321, f"조정한 칸 너비 기억 ({again.results.columnWidth(0)})")
+again.deleteLater()
 got = {f.filename: (f.get("title"), f.get("album"), f.get("albumartist"), f.get("track")) for f in w.model.files}
 check(got["02 곡 2.flac"] == ("꽃", "꽃갈피 (Remastered)", "IU", "2/4"), f"태그 적용 {got['02 곡 2.flac']}")
 check(by()["02 곡 2.flac"].get("genre") == "K-Pop", "끈 필드(장르)는 그대로")
