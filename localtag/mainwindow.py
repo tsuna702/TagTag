@@ -26,7 +26,7 @@ from .panel import TagPanel, changes_for
 from .rowdrag import RowDragger, move_to
 from .plan import Plan, UndoEntry, UndoItem
 from .tagio import (
-    AUDIO_EXTS, AudioFile, Options, move_file, restore_snapshot, scan,
+    AUDIO_EXTS, FIELD_LABELS, AudioFile, Options, move_file, restore_snapshot, scan,
 )
 
 APP_NAME = "LocalTag"
@@ -96,7 +96,9 @@ class MainWindow(QMainWindow):
         self.table.setModel(self.proxy)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        # 칸에서 바로 고치기: 더블클릭 · F2 (macOS 는 Return 도). 더블클릭은 eventFilter 에서 직접 처리한다
+        self.table.setEditTriggers(QAbstractItemView.EditKeyPressed)
+        self.model.on_edit = self._cell_edited
         self.table.setAlternatingRowColors(True)
         self.table.setShowGrid(False)
         self.table.setWordWrap(False)
@@ -128,7 +130,6 @@ class MainWindow(QMainWindow):
         self._sel_timer.setInterval(0)
         self._sel_timer.timeout.connect(self._on_selection)
         self.table.selectionModel().selectionChanged.connect(lambda *_: self._sel_timer.start())
-        self.table.doubleClicked.connect(lambda _: self.play())
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._table_menu)
         self.table.viewport().setAcceptDrops(True)
@@ -210,6 +211,7 @@ class MainWindow(QMainWindow):
         """창이 뜬 직후 나머지 창 모듈을 미리 불러 둔다. 앱이 켜져 있는 동안 앱 파일이 새 버전으로
         바뀌어도(새로 빌드) 나중에 창을 열 때 다른 버전의 모듈을 읽지 않게 한다."""
         from . import artworkdialog, backupdialog, compare, covermatch, dupes, export, extractdialog, exttags, rename, renamedialog, ytclean, ytdialog  # noqa: F401
+        from . import albumcheck, tagsource, tagsourcedialog  # noqa: F401
 
     def _prune_backups(self):
         try:
@@ -259,8 +261,12 @@ class MainWindow(QMainWindow):
         self.undo_act.setEnabled(False)
         m.addSeparator()
         self._act(m, "확장 태그…", self.extended_tags, "Ctrl+T")
+        edit_cell = self._act(m, "이 칸 고치기 (목록에서)", self.edit_current_cell, "F2")
+        edit_cell.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+        self.table.addAction(edit_cell)
         self._act(m, "태그 비교 (고른 곡 나란히)…", self.compare_tags, "Ctrl+Shift+D")
         self._act(m, "같은 곡 · 여러 버전 찾기…", self.find_duplicates, "Ctrl+Shift+U")
+        self._act(m, "앨범 점검 (Music 에서 갈라지는 앨범)…", self.check_albums, "Ctrl+Shift+L")
         m.addSeparator()
         self._act(m, "모두 선택", self.table.selectAll, QKeySequence.SelectAll)
         self._act(m, "선택 반전", self.invert_selection, "Ctrl+I")
@@ -285,6 +291,8 @@ class MainWindow(QMainWindow):
             self._act(m, text, lambda _=False, cls=cls: self.run_converter(cls), key)
         m.addSeparator()
         self._act(m, "곡명 · 파일명 일괄 변경…", self.batch_rename, "Alt+9")
+        m.addSeparator()
+        self._act(m, "Apple Music 에서 태그 가져오기…", self.tag_source, "Ctrl+Shift+G")
 
         m = mb.addMenu("커버")
         self._act(m, "앨범아트 찾기 · 가져오기…", self.find_artwork, "Ctrl+Shift+A")
@@ -446,6 +454,7 @@ class MainWindow(QMainWindow):
             conv.addAction(text, lambda cls=cls: self.run_converter(cls))
         conv.addSeparator()
         conv.addAction("곡명 · 파일명 일괄 변경…", self.batch_rename)
+        conv.addAction("Apple Music 에서 태그 가져오기…", self.tag_source)
         act = m.addMenu("액션")
         act.addAction("액션 그룹…", self.run_action_groups)
         act.addAction("빠른 액션…", self.quick_action)
@@ -940,6 +949,72 @@ class MainWindow(QMainWindow):
         if dlg.exec():
             self.apply_plans(dlg.result_plans(), "일괄 변경")
 
+    def tag_source(self):
+        """Apple Music 앨범 정보로 고른 곡의 태그 채우기 (짝은 자동, 곡마다 직접 고칠 수 있음)."""
+        files = self._files_for_command()
+        if not files:
+            return
+        from .tagsourcedialog import TagSourceDialog
+        dlg = TagSourceDialog(self, files, self.settings)
+        if dlg.exec() and dlg.plans:
+            self.apply_plans(dlg.plans, "Apple Music 에서 태그 가져오기")
+
+    def check_albums(self):
+        """같은 앨범 안의 태그 차이(앨범 아티스트·컴필레이션·총수·커버 등)를 찾아 맞춘다."""
+        self._confirm_pending()
+        from .albumcheck import AlbumCheckDialog, album_key
+        files = self.selected_files()
+        if files:
+            # 고른 곡이 속한 앨범은 목록에 있는 곡 전체로 점검한다 (한 곡만 골라도)
+            keys = {album_key(f.get("album")) for f in files if f.get("album").strip()}
+            files = [f for f in self.model.files if album_key(f.get("album")) in keys] or files
+        else:
+            files = self.visible_files()
+        if not files:
+            QMessageBox.information(self, APP_NAME, "점검할 곡을 목록에 먼저 불러오세요.")
+            return
+        dlg = AlbumCheckDialog(self, files)
+        if not dlg.exec():
+            return
+        if dlg.picked:
+            self.select_files(dlg.picked)
+        elif dlg.plans:
+            self.apply_plans(dlg.plans, "앨범 점검")
+
+    def edit_current_cell(self):
+        ix = self.table.currentIndex()
+        if ix.isValid() and ix.flags() & Qt.ItemIsEditable:
+            self.table.edit(ix)
+
+    def _cell_edited(self, f, key, value):
+        """목록 칸에서 고친 값 저장 — 패널에서 고친 것과 같이 안전 저장 · 실행 취소 · Music 반영."""
+        self._confirm_pending()
+        if key == "filename":
+            from .converters import build_target_path
+            stem = value.strip()
+            ext = os.path.splitext(f.path)[1]
+            if stem.lower().endswith(ext.lower()):
+                stem = stem[:-len(ext)]  # 확장자까지 쳤으면 한 번만
+            try:
+                path = build_target_path(f, stem.replace("/", "_").replace("\\", "_"), False)
+            except ValueError as e:
+                QMessageBox.warning(self, "파일명", str(e))
+                return
+            if path == f.path:
+                return
+            if os.path.exists(path) and not os.path.samefile(path, f.path):
+                QMessageBox.warning(self, "파일명", f"같은 이름의 파일이 이미 있습니다.\n{os.path.basename(path)}")
+                return
+            plan = Plan(f, new_path=path)
+            label = "파일명 바꾸기"
+        else:
+            from .script import split_values
+            vals = [v.strip() for v in split_values(value.strip()) if v.strip()]
+            plan = Plan(f, changes={key: vals})
+            label = f"{FIELD_LABELS.get(key, key)} 고치기"
+        # 칸 편집기가 닫힌 뒤에 저장한다 (저장하면 행이 새 파일로 바뀐다)
+        QTimer.singleShot(0, lambda: self.apply_plans([plan], label))
+
     def youtube_clean(self):
         """YouTube에서 받은 곡의 제목에서 꼬리말을 떼고 '아티스트 - 제목'을 나눈다.
         고른 곡, 고른 곡이 없으면 목록에 보이는 곡 전체를 한 번에 (미리 보고 적용)."""
@@ -1429,6 +1504,15 @@ class MainWindow(QMainWindow):
             self.table.setFocus()
             return True
         if obj is self.table.viewport():
+            if e.type() == QEvent.MouseButtonDblClick and e.button() == Qt.LeftButton:
+                # 고칠 수 있는 칸이면 그 자리에서 고치고, 나머지 칸(길이·비트레이트 등)은 재생
+                ix = self.table.indexAt(e.position().toPoint())
+                if ix.isValid() and ix.flags() & Qt.ItemIsEditable:
+                    self.table.setCurrentIndex(ix)
+                    self.table.edit(ix)
+                elif ix.isValid():
+                    self.play()
+                return True
             if e.type() in (QEvent.DragEnter, QEvent.DragMove) and (e.mimeData().hasUrls() or music.drag_has_music()):
                 e.acceptProposedAction()
                 return True

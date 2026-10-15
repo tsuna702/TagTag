@@ -88,6 +88,9 @@ RIGHT_ALIGNED = {"length", "bitrate", "samplerate", "size", "cover", "bits"}
 
 
 DISPLAY_ROLES = (Qt.DisplayRole, Qt.ToolTipRole)
+# 목록 칸에서 바로 고칠 수 있는 열 (파일명은 확장자를 뺀 이름만 고친다)
+EDITABLE = {"filename", "title", "artist", "album", "albumartist", "year", "track", "disc",
+            "genre", "composer", "comment"}
 
 
 class FileModel(QAbstractTableModel):
@@ -99,6 +102,7 @@ class FileModel(QAbstractTableModel):
         self.sort_column = -1
         self.sort_order = Qt.AscendingOrder
         self._rows: dict[int, int] | None = None  # id(파일) → 행 (필요할 때 만든다)
+        self.on_edit = None  # (파일, 열 키, 새 값) — 칸에서 고친 값을 실제로 저장하는 쪽 (MainWindow)
 
     def rowCount(self, parent=QModelIndex()):
         return 0 if parent.isValid() else len(self.files)
@@ -117,6 +121,10 @@ class FileModel(QAbstractTableModel):
             return None
         if role in DISPLAY_ROLES:
             return COLUMNS[index.column()][2](self.files[index.row()])
+        if role == Qt.EditRole:
+            key = COLUMNS[index.column()][0]
+            f = self.files[index.row()]
+            return f.stem if key == "filename" else f.get(key)
         if role == Qt.TextAlignmentRole:
             if COLUMNS[index.column()][0] in RIGHT_ALIGNED:
                 return int(Qt.AlignRight | Qt.AlignVCenter)
@@ -124,6 +132,24 @@ class FileModel(QAbstractTableModel):
         if role == SORT_ROLE:
             return COLUMNS[index.column()][3](self.files[index.row()])
         return None
+
+    def flags(self, index):
+        fl = super().flags(index)
+        if index.isValid() and self.on_edit and COLUMNS[index.column()][0] in EDITABLE:
+            fl |= Qt.ItemIsEditable
+        return fl
+
+    def setData(self, index, value, role=Qt.EditRole):
+        if role != Qt.EditRole or not index.isValid() or not self.on_edit:
+            return False
+        key = COLUMNS[index.column()][0]
+        f = self.files[index.row()]
+        old = f.stem if key == "filename" else f.get(key)
+        if key not in EDITABLE or str(value) == old:
+            return False
+        # 실제 저장은 MainWindow 가 한다 (안전 저장 · 실행 취소 · Music 반영). 저장되면 행이 새 파일로 바뀐다
+        self.on_edit(f, key, str(value))
+        return True
 
     def row_of(self, f: AudioFile) -> int:
         if self._rows is None:

@@ -26,7 +26,8 @@ Mp3tag 를 본뜬 음악 태그 편집기. Python 3 + PySide6(Qt) + mutagen. Git
    - Apple Music 자동 반영을 켠 채로 저장하지 않는다 (harness 가 확인한다). 실제 Music 보관함은 읽기만.
    - 테스트를 돌리면 **이번 실행 폴더만 남기고 이전 테스트 파일은 지운다** (harness 가 `tests/runs/` 에서 자동으로).
    - 샘플은 저장소 `samples/` 를 실행 폴더로 복사해서 쓴다. 원본 샘플을 고치지 않는다.
-   - 실행: `python tests/smoke.py` (Windows: `.venv\Scripts\python tests\smoke.py`). 새 기능에는 테스트를 더한다.
+   - 실행: `python tests/smoke.py`, `python tests/test_*.py` (Windows: `.venv\Scripts\python tests\smoke.py`).
+     새 기능에는 `tests/` 에 테스트를 더한다. 인터넷이 필요한 기능은 가짜 데이터로 시험한다.
 3. **서명 인증서를 만들자고 제안하지 않는다.** macOS 는 PyInstaller 임시(ad-hoc) 서명 그대로 — 사용자가 거절했다.
    Windows 도 서명하지 않은 `.exe` 로 시작한다 (SmartScreen 경고는 감수). 유료 인증서는 사용자가 먼저 말할 때만.
 4. **Apple Music 반영을 다시 빠르게 만들지 않는다.** 곡을 빨리 몰아 refresh 하면 Music 앨범 화면에서 곡이
@@ -58,6 +59,8 @@ Mp3tag 를 본뜬 음악 태그 편집기. Python 3 + PySide6(Qt) + mutagen. Git
 | `rename.py` / `renamedialog.py` | 곡명·파일명 일괄 변경 |
 | `ytclean.py` / `ytdialog.py` | YouTube 제목 정리 |
 | `dupes.py` / `compare.py` | 같은 곡 찾기 / 태그 비교 |
+| `tagsource.py` / `tagsourcedialog.py` | Apple Music(iTunes API)에서 태그 가져오기, 곡 짝짓기 |
+| `albumcheck.py` | 앨범 점검 (Music 에서 앨범이 갈라지는 태그 차이) |
 | `artwork*.py`, `covermatch.py`, `extract*.py` | 앨범아트 찾기·짝짓기·추출 |
 | `backup*.py` | 원본 백업 |
 | `music.py`, `filetrack.py` | **macOS 전용** Apple Music 연동, 옮겨진 파일 찾기 |
