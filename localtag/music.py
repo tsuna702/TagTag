@@ -215,7 +215,7 @@ end run
 PACES = {"fast": (0.8, 4.0), "normal": (1.5, 6.0), "slow": (3.0, 10.0)}
 PACE_LABELS = {"fast": "빠르게 (곡마다 0.8초 이상)", "normal": "보통 (곡마다 1.5초 이상)",
                "slow": "천천히 (곡마다 3초 이상)"}
-DEFAULT_PACE = "slow"
+DEFAULT_PACE = "fast"  # 0.9.7 부터 저장 전에 곡을 찾아 두어 몰아서 반영되지 않으므로 빠르게도 갈라지지 않음
 
 PREFLIGHT = '''
 tell application "Music"
@@ -656,7 +656,7 @@ def refresh(paths, progress=lambda *_: None, cancelled=lambda: False, expected=N
 # 앨범 이름 등을 바꿔 반영하면 Music 보관함 데이터는 맞는데 앨범 화면에서 곡이 갈라져 보일 때가 있다.
 # Music 을 다시 켜면 합쳐지므로, 반영이 끝난 뒤 다시 켠다.
 RESTART_MODES = {"never": "하지 않기", "idle": "재생 중이 아닐 때만", "always": "항상 (듣던 곡을 이어서 재생)"}
-DEFAULT_RESTART = "idle"
+DEFAULT_RESTART = "never"  # 0.9.7 이후로는 필요 없어짐 (사용자 확인) — 혹시 갈라지면 켜서 쓴다
 
 PLAYER_STATE = '''tell application "Music"
     set playerState to player state as string
