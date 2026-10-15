@@ -947,6 +947,11 @@ class MainWindow(QMainWindow):
     def undo(self):
         if not self.undo_stack:
             return
+        if getattr(self, "_music_busy", False):
+            # Music 이 아직 파일을 옮기는 중이면 경로가 바뀔 수 있다 — 반영이 끝난 뒤 되돌린다
+            self._undo_waiting = True
+            self.statusBar().showMessage("Music 반영이 끝나면 바로 되돌립니다…", 10000)
+            return
         entry = self.undo_stack.pop()
         by_path = {f.path: f for f in self.model.files}
         failed = []
@@ -968,6 +973,11 @@ class MainWindow(QMainWindow):
         self._update_status()
         self._report_failures(failed, "되돌리지 못한 파일")
         self.statusBar().showMessage(f"실행 취소: {entry.label}", 5000)
+        # 되돌린 태그도 Music 에 알린다 (저장할 때처럼 자동 반영을 켰을 때)
+        bad = {p for p, _ in failed}
+        restored_paths = [i.old_path for i in entry.items if i.new_path not in bad and os.path.exists(i.old_path)]
+        if IS_MAC and restored_paths and self.settings.value("music_auto", False, bool):
+            self._music_refresh_paths(restored_paths, modal=False)
 
     # ------------------------------------------------------------ 변환기 · 액션
     def _files_for_command(self):
@@ -1209,6 +1219,7 @@ class MainWindow(QMainWindow):
         def done(res):
             self._music_busy = False
             moved = self._relink(res.relocated)
+            self._run_waiting_undo()
             parts = [f"반영 확인됨 {res.confirmed}곡"]
             if res.unconfirmed:
                 parts.append(f"Music에 아직 옛 정보가 보임 {len(res.unconfirmed)}곡")
@@ -1243,6 +1254,7 @@ class MainWindow(QMainWindow):
 
         def fail(msg):
             self._music_busy = False
+            self._run_waiting_undo()
             if modal or "권한" in msg:
                 self._music_error(msg)
             else:
@@ -1283,6 +1295,11 @@ class MainWindow(QMainWindow):
         run_task(self, "Apple Music에 반영", job,
                  done, fail, modal=modal, status=lambda m: self.statusBar().showMessage(m, 3000))
 
+    def _run_waiting_undo(self):
+        if getattr(self, "_undo_waiting", False):
+            self._undo_waiting = False
+            QTimer.singleShot(0, self.undo)
+
     def _music_error(self, msg):
         box = QMessageBox(QMessageBox.Warning, "Apple Music", msg, QMessageBox.Ok, self)
         if "권한" in msg:
@@ -1306,9 +1323,26 @@ class MainWindow(QMainWindow):
                 moved += 1
             except Exception:
                 pass
+        self._relink_undo(relocated)
         if moved:
             self.panel.set_files(self.selected_files())
         return moved
+
+    def _relink_undo(self, relocated):
+        """Music 이 옮긴 파일은 실행 취소 기록의 경로도 새 위치로 고친다 (앨범을 바꾸면 Music 이 앨범 폴더를 옮긴다).
+        이름을 바꾸지 않은 곡은 원래 자리도 새 위치로 본다 — 되돌릴 때 파일을 옮기지 않고 그 자리에서 태그만 되돌리고,
+        폴더 정리는 다시 Music 에 맡긴다."""
+        moves = {os.path.realpath(o): n for o, n in relocated.items() if os.path.exists(n)}
+        if not moves:
+            return
+        for entry in self.undo_stack:
+            for item in entry.items:
+                new = moves.get(os.path.realpath(item.new_path))
+                if new is None:
+                    continue
+                if item.old_path == item.new_path:
+                    item.old_path = new
+                item.new_path = new
 
     def music_check(self):
         run_task(self, "Music 권한 확인", lambda prog, cancelled: music.ensure_access(launch=True),
