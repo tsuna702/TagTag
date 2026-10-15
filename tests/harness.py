@@ -20,7 +20,7 @@ sys.path.insert(0, ROOT)
 
 RUNS = os.path.join(ROOT, "tests", "runs")
 os.makedirs(RUNS, exist_ok=True)
-RUN = os.path.join(RUNS, time.strftime("%Y%m%d-%H%M%S"))
+RUN = os.path.join(RUNS, time.strftime("%Y%m%d-%H%M%S") + f"-{os.getpid()}")  # 같은 초에 여러 테스트를 돌려도 겹치지 않게
 for old in os.listdir(RUNS):
     p = os.path.join(RUNS, old)
     if p != RUN and os.path.isdir(p):

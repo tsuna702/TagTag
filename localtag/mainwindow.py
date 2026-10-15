@@ -251,8 +251,13 @@ class MainWindow(QMainWindow):
         self._act(m, "폴더 열기…", self.open_folder, "Ctrl+O")
         self._act(m, "폴더 추가…", self.add_folder, "Ctrl+Shift+O")
         self._act(m, "파일 추가…", self.add_files_dialog, "Ctrl+Alt+O")
+        self.recent_menu = m.addMenu("최근 연 폴더")
+        self.recent_menu.aboutToShow.connect(self._fill_recent)
+        self._fill_recent()  # macOS 메뉴 막대는 비어 있는 메뉴를 못 열 수 있어 미리 채워 둔다
         m.addSeparator()
         self._act(m, "하위 폴더 포함", self._set_recursive, checkable=True, checked=self.recursive)
+        self._act(m, "시작할 때 마지막 목록 다시 열기", lambda on: self.settings.setValue("reopen_last", on),
+                  checkable=True, checked=self.settings.value("reopen_last", False, bool))
         m.addSeparator()
         self._act(m, "저장", lambda: self.save(), QKeySequence.Save)
         self._act(m, "목록 새로 고침", self.refresh, "F5")
@@ -626,8 +631,70 @@ class MainWindow(QMainWindow):
             self.model.add_files(loaded)
         self.panel.set_files(self.selected_files())
         self._update_status()
+        self._remember_paths(paths, replace)
         self._report_failures(failed, "읽지 못한 파일")
         self.statusBar().showMessage(f"{len(loaded)}개 파일을 불러왔습니다.", 5000)
+
+    # ------------------------------------------------------------ 최근 연 폴더
+    def _settings_list(self, key):
+        v = self.settings.value(key, [])
+        return [v] if isinstance(v, str) else list(v or [])
+
+    def _remember_paths(self, paths, replace):
+        """연 폴더는 '최근 연 폴더'에, 목록을 이룬 경로는 '마지막 목록'에 적어 둔다."""
+        dirs = [os.path.abspath(p) for p in paths if os.path.isdir(p)]
+        if dirs:
+            dirs = list(dict.fromkeys(dirs))
+            recent = dirs + [d for d in self._settings_list("recent_folders") if d not in dirs]
+            self.settings.setValue("recent_folders", recent[:RECENT_MAX])
+            # 단축키(⌥⌘1~9)가 새 목록을 따르게. 메뉴 항목을 누른 처리 중에 그 메뉴를 비우지 않도록 한 박자 뒤에
+            QTimer.singleShot(0, self._fill_recent)
+        roots = [] if replace else self._settings_list("last_list")
+        roots += [os.path.abspath(p) for p in paths if os.path.abspath(p) not in roots]
+        self.settings.setValue("last_list", roots)
+
+    def _fill_recent(self):
+        m = self.recent_menu
+        m.clear()
+        recent = self._settings_list("recent_folders")
+        if not recent:
+            a = m.addAction("(아직 없음)")
+            a.setEnabled(False)
+            return
+        for i, d in enumerate(recent):
+            name = os.path.basename(d.rstrip(os.sep)) or d
+            parent = os.path.dirname(d.rstrip(os.sep)).replace(os.path.expanduser("~"), "~", 1)
+            a = m.addAction(f"{name}  —  {parent}")
+            a.setToolTip(d)
+            if i < 9:
+                a.setShortcut(QKeySequence(f"Ctrl+Alt+{i + 1}"))
+            if not os.path.isdir(d):
+                a.setText(f"{name}  —  찾을 수 없음")
+                a.setEnabled(False)
+            a.triggered.connect(lambda _=False, d=d: self.open_recent(d))
+        m.addSeparator()
+        hint = m.addAction(keys("⇧ 를 누른 채 고르면 지금 목록에 추가"))
+        hint.setEnabled(False)
+        m.addAction("목록 지우기", self._clear_recent)
+
+    def _clear_recent(self):
+        self.settings.setValue("recent_folders", [])
+        QTimer.singleShot(0, self._fill_recent)
+
+    def open_recent(self, folder):
+        if not os.path.isdir(folder):
+            QMessageBox.information(self, APP_NAME, f"폴더를 찾을 수 없습니다.\n{folder}")
+            return
+        add = bool(QApplication.keyboardModifiers() & Qt.ShiftModifier)
+        self.load_paths([folder], replace=not add)
+
+    def reopen_last(self):
+        """'시작할 때 마지막 목록 다시 열기'가 켜져 있으면 지난번 목록을 다시 불러온다."""
+        if not self.settings.value("reopen_last", False, bool):
+            return
+        roots = [p for p in self._settings_list("last_list") if os.path.exists(p)]
+        if roots:
+            self.load_paths(roots, replace=True)
 
     def _load_files(self, paths, label):
         loaded, failed = [], []
@@ -704,6 +771,7 @@ class MainWindow(QMainWindow):
 
     def clear_list(self):
         self._confirm_pending()
+        self.settings.setValue("last_list", [])
         self.model.set_files([])
         self.panel.set_files([])
         self._update_status()
@@ -1560,6 +1628,8 @@ class MainWindow(QMainWindow):
         super().closeEvent(e)
 
 
+RECENT_MAX = 10
+
 QUICK_FILTERS = [
     ("커버 없는 곡", "cover MISSING"),
     ("낮은 음질 (192 kbps 미만, 무손실 빼고)", "bitrate LESS 192 AND lossless MISSING"),
@@ -1619,4 +1689,6 @@ def main(argv=None):
     paths = [p for p in argv[1:] if os.path.exists(p)]
     if paths:
         w.load_paths(paths, replace=True)
+    else:
+        QTimer.singleShot(0, w.reopen_last)
     return app.exec()
