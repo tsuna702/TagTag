@@ -52,13 +52,20 @@ def run_task(parent, title, fn, on_done, on_fail, modal=True, status=None):
             dlg.reset()
             dlg.close()
         handler(value)
-        task.deleteLater()
+        # 지우기는 스레드가 완전히 끝난 뒤에 (succeeded 는 run() 안에서 보내므로 여기서 지우면
+        # 아직 도는 스레드를 지우게 되어 앱이 죽는다)
 
     task.progress.connect(prog)
     task.succeeded.connect(lambda v: finish(on_done, v))
     task.failed.connect(lambda m: finish(on_fail, m))
     parent._tasks = getattr(parent, "_tasks", set())
     parent._tasks.add(task)
-    task.finished.connect(lambda: parent._tasks.discard(task))
+
+    def cleanup():
+        task.wait()  # finished 직후 — 곧바로 끝난다
+        parent._tasks.discard(task)
+        task.deleteLater()
+
+    task.finished.connect(cleanup)
     task.start()
     return task
