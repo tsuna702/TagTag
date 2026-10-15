@@ -28,7 +28,7 @@ from .rowdrag import RowDragger, move_to
 from .plan import Plan, UndoEntry, UndoItem
 from .safewrite import error_text
 from .tagio import (
-    AUDIO_EXTS, FIELD_LABELS, AudioFile, Options, move_file, restore_snapshot, scan,
+    AUDIO_EXTS, FIELD_LABELS, AudioFile, Options, move_file, restore_snapshot, scan, take_snapshot,
 )
 
 APP_NAME = "LocalTag"
@@ -93,6 +93,7 @@ class MainWindow(QMainWindow):
         self.recursive = self.settings.value("recursive", True, bool)
         self.last_dir = self.settings.value("last_dir", os.path.expanduser("~/Music"), str)
         self.undo_stack: list[UndoEntry] = []
+        self.redo_stack: list[UndoEntry] = []  # 되돌린 작업 — 새 작업을 하면 비운다
         data_dir = QStandardPaths.writableLocation(QStandardPaths.AppDataLocation)
         self.actions = ActionStore(os.path.join(data_dir, "actions.json"))
         self.backups = BackupStore(os.path.join(data_dir, "Backups"))
@@ -278,6 +279,8 @@ class MainWindow(QMainWindow):
         m = mb.addMenu("편집")
         self.undo_act = self._act(m, "실행 취소", self.undo, QKeySequence.Undo)
         self.undo_act.setEnabled(False)
+        self.redo_act = self._act(m, "다시 실행", self.redo, QKeySequence.Redo)
+        self.redo_act.setEnabled(False)
         m.addSeparator()
         self._act(m, "확장 태그…", self.extended_tags, "Ctrl+T")
         edit_cell = self._act(m, "이 칸 고치기 (목록에서)", self.edit_current_cell, "F2")
@@ -401,6 +404,7 @@ class MainWindow(QMainWindow):
 
         self.tb_save = button("저장", self.save, keys("바꾼 태그 저장 (⌘S)"))
         self.tb_undo = button("되돌리기", self.undo, keys("마지막 작업 되돌리기 (⌘Z)"))
+        self.tb_redo = button("다시 실행", self.redo, keys("되돌린 작업 다시 하기 (⇧⌘Z)"))
         tb.addSeparator()
         self.tb_refresh = button("새로고침", self.refresh, "목록의 파일을 다시 읽기 (F5)")
         self.tb_clear = button("목록 지우기", self.clear_list, "목록 비우기 — 파일은 지우지 않습니다")
@@ -423,6 +427,9 @@ class MainWindow(QMainWindow):
         self.tb_undo.setEnabled(bool(self.undo_stack))
         self.tb_undo.setToolTip(keys(f"되돌리기: {self.undo_stack[-1].label} (⌘Z)") if self.undo_stack
                                 else "되돌릴 작업이 없습니다")
+        self.tb_redo.setEnabled(bool(self.redo_stack))
+        self.tb_redo.setToolTip(keys(f"다시 실행: {self.redo_stack[-1].label} (⇧⌘Z)") if self.redo_stack
+                                else "다시 실행할 작업이 없습니다")
         self.tb_refresh.setEnabled(has_files)
         self.tb_clear.setEnabled(has_files)
         has_sel = self.table.selectionModel().hasSelection()
@@ -934,6 +941,7 @@ class MainWindow(QMainWindow):
             except OSError:
                 pass
         if entry.items:
+            self.redo_stack.clear()
             self._push_undo(entry)
             if music_on:
                 changed = [i.new_path for i in entry.items]
@@ -963,6 +971,7 @@ class MainWindow(QMainWindow):
                     pass
         # 파일이 메모리 속 실행 취소 기록과 달라졌으므로 기록을 비운다
         self.undo_stack.clear()
+        self.redo_stack.clear()
         self._update_undo_action()
         self.panel.set_files(self.selected_files())
         self._update_status()
@@ -985,44 +994,64 @@ class MainWindow(QMainWindow):
         else:
             self.undo_act.setText("실행 취소")
             self.undo_act.setEnabled(False)
+        self.redo_act.setText(f"다시 실행: {self.redo_stack[-1].label}" if self.redo_stack else "다시 실행")
+        self.redo_act.setEnabled(bool(self.redo_stack))
         self._update_toolbar()
 
     def undo(self):
-        if not self.undo_stack:
+        self._step(self.undo_stack, "실행 취소", "되돌리지 못한 파일")
+
+    def redo(self):
+        self._step(self.redo_stack, "다시 실행", "다시 실행하지 못한 파일")
+
+    def _step(self, stack, verb, fail_title):
+        """기록 하나를 되돌린다. 되돌리기 직전 상태를 반대쪽 기록으로 남긴다 (실행 취소 ↔ 다시 실행)."""
+        if not stack:
             return
         if getattr(self, "_music_busy", False):
             # Music 이 아직 파일을 옮기는 중이면 경로가 바뀔 수 있다 — 반영이 끝난 뒤 되돌린다
-            self._undo_waiting = True
-            self.statusBar().showMessage("Music 반영이 끝나면 바로 되돌립니다…", 10000)
+            self._undo_waiting = verb
+            self.statusBar().showMessage(f"Music 반영이 끝나면 바로 {verb}합니다…", 10000)
             return
-        entry = self.undo_stack.pop()
+        entry = stack.pop()
+        back = UndoEntry(entry.label)
+        back.album_change = getattr(entry, "album_change", True)
         by_path = {f.path: f for f in self.model.files}
         failed = []
         for item in reversed(entry.items):
             try:
+                now = take_snapshot(item.new_path) if item.snapshot is not None else None
                 if item.new_path != item.old_path:
                     move_file(item.new_path, item.old_path)
                 if item.snapshot is not None:
                     restored = restore_snapshot(item.old_path, item.snapshot, opts=self.opts)
                 else:
                     restored = AudioFile.load(item.old_path, self.opts)
+                rev = UndoItem(item.new_path, item.old_path, now)
+                rev.pid = getattr(item, "pid", None)
+                back.items.append(rev)
                 f = by_path.get(item.new_path)
                 if f is not None:
                     self.model.replace(f, restored)
             except Exception as e:
                 failed.append((item.new_path, error_text(e)))
+        if back.items:
+            if stack is self.undo_stack:
+                self.redo_stack.append(back)
+            else:
+                self._push_undo(back)
         self._update_undo_action()
         self.panel.set_files(self.selected_files())
         self._update_status()
-        self._report_failures(failed, "되돌리지 못한 파일")
-        self.statusBar().showMessage(f"실행 취소: {entry.label}", 5000)
+        self._report_failures(failed, fail_title)
+        self.statusBar().showMessage(f"{verb}: {entry.label}", 5000)
         # 되돌린 태그도 Music 에 알린다 (저장할 때처럼 자동 반영을 켰을 때)
         bad = {p for p, _ in failed}
         restored_paths = [i.old_path for i in entry.items if i.new_path not in bad and os.path.exists(i.old_path)]
         if IS_MAC and restored_paths and self.settings.value("music_auto", False, bool):
             known = {i.old_path: i.pid for i in entry.items if getattr(i, "pid", None)}
             self._music_refresh_paths(restored_paths, modal=False,
-                                      album_change=getattr(entry, "album_change", True), known_pids=known)
+                                      album_change=back.album_change, known_pids=known)
 
     # ------------------------------------------------------------ 변환기 · 액션
     def _files_for_command(self):
@@ -1408,9 +1437,10 @@ class MainWindow(QMainWindow):
         return n
 
     def _run_waiting_undo(self):
-        if getattr(self, "_undo_waiting", False):
+        waiting = getattr(self, "_undo_waiting", False)
+        if waiting:
             self._undo_waiting = False
-            QTimer.singleShot(0, self.undo)
+            QTimer.singleShot(0, self.redo if waiting == "다시 실행" else self.undo)
 
     def _music_error(self, msg):
         box = QMessageBox(QMessageBox.Warning, "Apple Music", msg, QMessageBox.Ok, self)
@@ -1447,7 +1477,7 @@ class MainWindow(QMainWindow):
         moves = {os.path.realpath(o): n for o, n in relocated.items() if os.path.exists(n)}
         if not moves:
             return
-        for entry in self.undo_stack:
+        for entry in self.undo_stack + self.redo_stack:
             for item in entry.items:
                 new = moves.get(os.path.realpath(item.new_path))
                 if new is None:

@@ -5,17 +5,21 @@
 """
 from __future__ import annotations
 
+import html
 import json
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QFormLayout, QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
-    QListWidget, QListWidgetItem, QMenu, QMessageBox, QPushButton, QSpinBox, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout, QInputDialog, QLabel,
+    QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox, QPushButton, QSpinBox, QTextBrowser, QVBoxLayout,
+    QWidget,
 )
 
 from .converters import ConverterDialog, build_target_path, check_conflicts, display_path
 from .plan import Plan
-from .rename import FORMS, INT_RANGES, RULE_TYPES, apply_rules, compile_rules, describe, new_rule
+from .rename import (
+    FORMS, INT_RANGES, REGEX_HELP, REGEX_PRESETS, RULE_TYPES, apply_rules, compile_rules, describe, new_rule,
+)
 from .script import ScriptError
 from .tagio import FIELD_LABELS, field_key
 
@@ -216,6 +220,59 @@ class RenameDialog(ConverterDialog):
                 w.setCurrentIndex(max(0, w.findData(r.get(key))))
                 w.currentIndexChanged.connect(lambda _i, w=w, f=setter(key): f(w.currentData()))
                 self.editor_form.addRow(label + ":", w)
+        if r["type"] == "replace":
+            row_w = QHBoxLayout()
+            presets = QPushButton("자주 쓰는 정규식")
+            presets.setAutoDefault(False)
+            menu = QMenu(presets)
+            for name, find, repl, before, after in REGEX_PRESETS:
+                act = menu.addAction(f"{name}      {before} → {after or '(빈칸)'}")
+                act.setToolTip(f"찾을 말: {find}\n바꿀 말: {repl or '(빈칸)'}")
+                act.triggered.connect(lambda _=False, f=find, p=repl: self._use_regex(row, f, p))
+            menu.setToolTipsVisible(True)
+            presets.setMenu(menu)
+            presets.setToolTip("고르면 찾을 말·바꿀 말을 채우고 정규식을 켭니다")
+            help_b = QPushButton("?")
+            help_b.setAutoDefault(False)
+            help_b.setFixedWidth(32)
+            help_b.setToolTip("정규식 쓰는 법")
+            help_b.clicked.connect(self._regex_help)
+            row_w.addWidget(presets)
+            row_w.addWidget(help_b)
+            row_w.addStretch(1)
+            self.editor_form.addRow("", row_w)
+
+    def _use_regex(self, row, find, repl):
+        r = self.rules[row]
+        r.update(find=find, repl=repl, regex=True)
+        self._relabel(row)
+        QTimer.singleShot(0, lambda: self._show_rule(row))  # 메뉴를 띄운 단추를 그 안에서 지우지 않게
+        self.schedule()
+
+    def _regex_help(self):
+        rows = "".join(f"<tr><td><code>{html.escape(a)}</code></td><td>{html.escape(b)}</td>"
+                       f"<td><code>{html.escape(c)}</code></td></tr>" for a, b, c in REGEX_HELP)
+        ex = "".join(f"<tr><td>{html.escape(n)}</td><td><code>{html.escape(f)}</code></td>"
+                     f"<td><code>{html.escape(p) or '(빈칸)'}</code></td></tr>" for n, f, p, _b, _a in REGEX_PRESETS)
+        dlg = QDialog(self)
+        dlg.setWindowTitle("정규식 쓰는 법")
+        dlg.resize(820, 640)
+        v = QVBoxLayout(dlg)
+        view = QTextBrowser()
+        view.setHtml(
+            "<p><b>정규식</b>을 켜면 찾을 말을 규칙(패턴)으로 씁니다. 대소문자 구분을 끄면 A 와 a 를 같게 봅니다.</p>"
+            "<table cellspacing=0 cellpadding=4 border=1 style='border-collapse:collapse'>"
+            "<tr><th align=left>쓰는 법</th><th align=left>뜻</th><th align=left>예</th></tr>"
+            f"{rows}</table><h4>자주 쓰는 식 — '자주 쓰는 정규식' 단추로 바로 넣을 수 있습니다</h4>"
+            "<table cellspacing=0 cellpadding=4 border=1 style='border-collapse:collapse'>"
+            "<tr><th align=left>하는 일</th><th align=left>찾을 말</th><th align=left>바꿀 말</th></tr>"
+            f"{ex}</table>")
+        v.addWidget(view)
+        close = QDialogButtonBox(QDialogButtonBox.Close)
+        close.button(QDialogButtonBox.Close).setText("닫기")
+        close.rejected.connect(dlg.reject)
+        v.addWidget(close)
+        dlg.exec()
 
     # ------------------------------------------------------------ 규칙 묶음
     def _load_presets(self):
