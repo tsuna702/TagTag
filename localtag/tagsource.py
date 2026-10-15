@@ -115,14 +115,19 @@ def search(term: str, country: str = "kr") -> list[Release]:
         raise SourceError("검색어를 넣어 주세요.")
     # 한국 스토어는 공개 API 의 앨범 검색이 비어 온다 → 일본·미국 스토어에서 찾고,
     # 고른 스토어에도 있는 앨범은 그 스토어 것으로 표시한다 (곡 목록도 그 스토어 이름으로 받는다).
-    # 세 스토어를 동시에 찾고 앞 순서의 결과를 쓴다
+    # 세 스토어를 동시에 찾고 앞 순서의 결과를 쓴다. 곡 검색도 함께 — 앨범 정보의 이름은 로마자인 경우가 있어
+    # (일본 스토어 등) 곡에 붙은 앨범 이름(원래 글자)을 쓴다
     stores = list(dict.fromkeys([country, "jp", "us"]))
-    answers = _together(*[lambda c=c: _json("https://itunes.apple.com/search?" + parse.urlencode(
-        {"term": term.strip(), "country": c, "media": "music", "entity": "album", "limit": 50})) for c in stores])
-    for c, r in zip(stores, answers):
+    find = lambda c, entity, limit: _json("https://itunes.apple.com/search?" + parse.urlencode(  # noqa: E731
+        {"term": term.strip(), "country": c, "media": "music", "entity": entity, "limit": limit}))
+    song_stores = [c for c in stores if c != "kr"]  # 한국 스토어는 곡 검색도 비어 온다
+    answers = _together(*[lambda c=c: find(c, "album", 50) for c in stores],
+                        *[lambda c=c: find(c, "song", 200) for c in song_stores])
+    albums, songs = answers[:len(stores)], dict(zip(song_stores, answers[len(stores):]))
+    if all(isinstance(x, SourceError) for x in albums):
+        raise albums[0]
+    for c, r in zip(stores, albums):
         if isinstance(r, SourceError):
-            if all(isinstance(x, SourceError) for x in answers):
-                raise r
             continue
         out, seen = [], set()
         for x in r.get("results", []):
@@ -132,32 +137,60 @@ def search(term: str, country: str = "kr") -> list[Release]:
                 seen.add(rel.id)
                 out.append(rel)
         if out:
+            got = songs.get(c)
+            names = _album_names(out, c, got.get("results", []) if isinstance(got, dict) else [])
             if c != country:
-                _localize_releases(out, country)
+                _localize_releases(out, country, names)
+            for rel in out:
+                if rel.country == c and rel.id in names:
+                    rel.album = names[rel.id][0]
             return out
     return []
 
 
-def _lookup_ids(ids, country) -> list:
+def _lookup_ids(ids, country, **extra) -> list:
     """ID 여러 개를 한 스토어에서 (한 번에 너무 많지 않게 나눠서)."""
     res = []
     for i in range(0, len(ids), 100):
         res += _json("https://itunes.apple.com/lookup?" + parse.urlencode(
-            {"id": ",".join(ids[i:i + 100]), "country": country})).get("results", [])
+            {"id": ",".join(ids[i:i + 100]), "country": country, **extra})).get("results", [])
     return res
 
 
-def _localize_releases(rels, country):
-    """다른 스토어에서 찾은 앨범 중 고른 스토어에도 있는 것은 그 스토어 이름·국가로."""
-    try:
-        got = {str(x.get("collectionId")): x for x in _lookup_ids([r.id for r in rels], country)
-               if x.get("wrapperType") == "collection"}
-    except SourceError:
+def _album_names(rels, store, songs) -> dict:
+    """앨범 ID → (곡에 붙은 앨범 이름, 그 곡 ID). 곡 검색에 없던 앨범은 앨범마다 곡 하나씩 받아서."""
+    names = {}
+    for x in songs:
+        if x.get("wrapperType") == "track" and x.get("collectionName"):
+            names.setdefault(str(x.get("collectionId")), (x["collectionName"], str(x.get("trackId"))))
+    missing = [r.id for r in rels if r.id not in names]
+    if missing:
+        try:
+            for x in _lookup_ids(missing, store, entity="song", limit=1):
+                if x.get("wrapperType") == "track" and x.get("collectionName"):
+                    names.setdefault(str(x.get("collectionId")), (x["collectionName"], str(x.get("trackId"))))
+        except SourceError:
+            pass
+    return names
+
+
+def _localize_releases(rels, country, names=None):
+    """다른 스토어에서 찾은 앨범 중 고른 스토어에도 있는 것은 그 스토어 이름·국가로.
+    names(_album_names)가 있으면 그 곡 ID 로 고른 스토어의 앨범 이름도 받는다 (한국 스토어는 곡으로만 한국어 이름을 준다)."""
+    tids = [t for t in ((names or {}).get(r.id, (None, None))[1] for r in rels) if t and t != "None"]
+    albums, tracks = _together(lambda: _lookup_ids([r.id for r in rels], country),
+                               lambda: _lookup_ids(tids, country) if tids else [])
+    if isinstance(albums, SourceError):
         return
+    got = {str(x.get("collectionId")): x for x in albums if x.get("wrapperType") == "collection"}
+    local = {} if isinstance(tracks, SourceError) else {
+        str(x.get("collectionId")): x.get("collectionName") for x in tracks
+        if x.get("wrapperType") == "track" and x.get("collectionName")}
     for r in rels:
         x = got.get(r.id)
         if x:
             r.artist = x.get("artistName") or r.artist
+            r.album = local.get(r.id) or (names or {}).get(r.id, (r.album,))[0]
             r.country = country
 
 
@@ -193,10 +226,11 @@ def lookup(album_id: str, country: str = "kr") -> Release:
             local = {}
         if local:
             tracks = [local.get(str(t.get("trackId")), t) for t in tracks]
-            album, c = dict(home), country
-            names = Counter(x.get("collectionName") for x in local.values() if x.get("collectionName"))
-            if names:
-                album["collectionName"] = names.most_common(1)[0][0]
+            album, c = home, country
+    # 앨범 정보의 이름은 로마자일 때가 있다 (일본 스토어 등) → 곡에 붙은 앨범 이름(원래 글자)을 쓴다
+    names = Counter(x.get("collectionName") for x in tracks if x.get("collectionName"))
+    if names:
+        album = dict(album, collectionName=names.most_common(1)[0][0])
     rel = _release(album)
     rel.country = c
     for t in sorted(tracks, key=lambda t: (t.get("discNumber", 1), t.get("trackNumber", 0))):
