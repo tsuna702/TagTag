@@ -70,7 +70,7 @@ Mp3tag 를 본뜬 음악 태그 편집기. Python 3 + PySide6(Qt) + mutagen. Git
 | `rename.py` / `renamedialog.py` | 곡명·파일명 일괄 변경 |
 | `ytclean.py` / `ytdialog.py` | YouTube 제목 정리 |
 | `dupes.py` / `compare.py` | 같은 곡 찾기 / 태그 비교 |
-| `tagsource.py` / `tagsourcedialog.py` | Apple Music(iTunes API)에서 태그 가져오기, 곡 짝짓기 |
+| `tagsource.py` / `tagsourcedialog.py` | Apple Music(iTunes API)·MusicBrainz(보충, 초당 1번·연락처 User-Agent)에서 태그 가져오기, 곡 짝짓기 |
 | `albumcheck.py` | 앨범 점검 (Music 에서 앨범이 갈라지는 태그 차이) |
 | `artwork*.py`, `covermatch.py`, `extract*.py` | 앨범아트 찾기·짝짓기·추출 |
 | `backup*.py` | 원본 백업 |

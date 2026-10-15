@@ -1,4 +1,4 @@
-"""Apple Music 에서 태그 가져오기 창.
+"""Apple Music 에서 태그 가져오기 창 (MusicBrainz 로 보충).
 
 앨범을 검색해 고르면 곡 목록을 내려받아 고른 곡과 자동으로 짝짓는다 (제목·트랙 번호·길이).
 짝은 곡마다 콤보 상자로 직접 고칠 수 있다. 체크한 필드만, 바뀌는 곡에만 적용한다.
@@ -36,31 +36,35 @@ class TagSourceDialog(QDialog):
         self.scores = [0.0] * len(files)
         self.plans = []
         self._cache = {}
-        self.setWindowTitle("Apple Music 에서 태그 가져오기")
+        self.setWindowTitle("Apple Music · MusicBrainz 에서 태그 가져오기")
         self.resize(1180, 720)
         v = QVBoxLayout(self)
 
         top = QHBoxLayout()
         self.query = QLineEdit(ts.guess_query(files))
-        self.query.setPlaceholderText("아티스트 앨범 이름, 또는 Apple Music 앨범 링크")
+        self.query.setPlaceholderText("아티스트 앨범 이름, 또는 Apple Music · MusicBrainz 앨범 링크")
         self.query.returnPressed.connect(self.search)
         self.country = QComboBox()
         for k, t in ts.COUNTRIES.items():
             self.country.addItem(t, k)
         self.country.setCurrentIndex(max(0, self.country.findData(settings.value("source/country", "kr", str))))
         self.country.setToolTip("이 스토어의 이름으로 가져옵니다 — 검색 결과가 없으면 일본·미국 스토어에서 찾은 뒤 이 스토어 이름으로 바꿉니다")
+        self.use_mb = QCheckBox("MusicBrainz 도")
+        self.use_mb.setChecked(settings.value("source/musicbrainz", True, bool))
+        self.use_mb.setToolTip("Apple Music 결과 뒤에 MusicBrainz 결과를 붙입니다 — 애니·게임 OST 처럼 Apple Music 에 없는 앨범")
         go = QPushButton("검색")
         go.setAutoDefault(False)
         go.clicked.connect(self.search)
         top.addWidget(QLabel("검색:"))
         top.addWidget(self.query, 1)
         top.addWidget(self.country)
+        top.addWidget(self.use_mb)
         top.addWidget(go)
         v.addLayout(top)
 
         split = QSplitter(Qt.Horizontal)
-        self.results = QTableWidget(0, 5)
-        self.results.setHorizontalHeaderLabels(["앨범", "아티스트", "연도", "곡 수", "나라"])
+        self.results = QTableWidget(0, 6)
+        self.results.setHorizontalHeaderLabels(["앨범", "아티스트", "연도", "곡 수", "나라", "출처"])
         self.results.verticalHeader().hide()
         self.results.verticalHeader().setDefaultSectionSize(24)
         self.results.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -69,7 +73,7 @@ class TagSourceDialog(QDialog):
         self.results.setWordWrap(False)
         rh = self.results.horizontalHeader()
         rh.setSectionResizeMode(QHeaderView.Interactive)
-        for c, w in enumerate((260, 140, 50, 50)):
+        for c, w in enumerate((240, 130, 50, 50, 60)):
             self.results.setColumnWidth(c, w)
         rh.setStretchLastSection(True)
         self.results.currentCellChanged.connect(lambda row, *_: self._pick_release(self._release_row(row)))
@@ -153,9 +157,10 @@ class TagSourceDialog(QDialog):
 
     # ------------------------------------------------------------ 검색
     def search(self):
-        term, country = self.query.text(), self.country.currentData()
+        term, country, mb = self.query.text(), self.country.currentData(), self.use_mb.isChecked()
         self.settings.setValue("source/country", country)
-        run_task(self, "Apple Music 에서 찾는 중…", lambda prog, cancelled: ts.search(term, country),
+        self.settings.setValue("source/musicbrainz", mb)
+        run_task(self, "찾는 중…", lambda prog, cancelled: ts.find(term, country, mb),
                  self._show_results, self._failed)
 
     def _failed(self, msg):
@@ -169,7 +174,7 @@ class TagSourceDialog(QDialog):
         t.setRowCount(len(releases))
         for i, r in enumerate(releases):
             cells = (r.album, r.artist, int(r.year) if r.year.isdigit() else r.year, r.count or "",
-                     ts.COUNTRIES.get(r.country, r.country.upper()))
+                     r.country_name(), "MB" if r.source == "mb" else "Apple")
             for c, val in enumerate(cells):
                 it = QTableWidgetItem()
                 it.setData(Qt.DisplayRole, val)
@@ -193,16 +198,18 @@ class TagSourceDialog(QDialog):
         if not (0 <= row < len(getattr(self, "releases", []))):
             return
         r = self.releases[row]
-        key = (r.id, self.country.currentData())
+        key = (r.source, r.id, "" if r.source == "mb" else self.country.currentData())
         if key in self._cache:
             self._set_release(self._cache[key])
             return
-        run_task(self, "곡 목록을 받는 중…", lambda prog, cancelled: ts.lookup(r.id, key[1]),
+        run_task(self, "곡 목록을 받는 중…", lambda prog, cancelled: ts.get(r, key[2]),
                  lambda rel: (self._cache.__setitem__(key, rel), self._set_release(rel)), self._failed)
 
     def _set_release(self, rel):
         self.rel = rel
-        self.album_label.setText(f"<b>{rel.album}</b> — {rel.artist} · {rel.year} · {rel.genre} · 곡 {len(rel.tracks)}개")
+        bits = " · ".join(x for x in (rel.year, rel.genre, f"곡 {len(rel.tracks)}개", ts.SOURCES[rel.source]) if x)
+        nocover = " · 커버 없음" if not rel.artwork else ""
+        self.album_label.setText(f"<b>{rel.album}</b> — {rel.artist} · {bits}{nocover}")
         for i in range(len(self.files)):
             cb = QComboBox()
             cb.addItem("— 짝 없음 —", None)
@@ -277,7 +284,7 @@ class TagSourceDialog(QDialog):
         else:
             dup = sum(1 for n in used.values() if n > 1)
             extra = f" · <span style='color:#cd7800'>겹친 짝 {dup}개</span>" if dup else ""
-            self.summary.setText(f"곡 {len(self.files)}개 중 {n_pair}개 짝지음 · Apple Music 곡 {len(self.rel.tracks)}개{extra}")
+            self.summary.setText(f"곡 {len(self.files)}개 중 {n_pair}개 짝지음 · {ts.SOURCES[self.rel.source]} 곡 {len(self.rel.tracks)}개{extra}")
         self.ok_btn.setEnabled(bool(self.rel) and n_pair > 0)
 
     # ------------------------------------------------------------ 적용
@@ -298,8 +305,7 @@ class TagSourceDialog(QDialog):
             pic = None
             if want_cover:
                 from . import artwork as art
-                from .extract import hi_res
-                data = art.fetch(hi_res(rel.artwork, size), 30 * 1024 * 1024)
+                data = art.fetch(ts.cover_url(rel, size), 30 * 1024 * 1024)
                 pic = art.process(data)
             return pic
 

@@ -313,7 +313,7 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         self._act(m, "곡명 · 파일명 일괄 변경…", self.batch_rename, "Alt+9")
         m.addSeparator()
-        self._act(m, "Apple Music 에서 태그 가져오기…", self.tag_source, "Ctrl+Shift+G")
+        self._act(m, "Apple Music · MusicBrainz 에서 태그 가져오기…", self.tag_source, "Ctrl+Shift+G")
 
         m = mb.addMenu("커버")
         self._act(m, "앨범아트 찾기 · 가져오기…", self.find_artwork, "Ctrl+Shift+A")
@@ -493,7 +493,7 @@ class MainWindow(QMainWindow):
             conv.addAction(text, lambda cls=cls: self.run_converter(cls))
         conv.addSeparator()
         conv.addAction("곡명 · 파일명 일괄 변경…", self.batch_rename)
-        conv.addAction("Apple Music 에서 태그 가져오기…", self.tag_source)
+        conv.addAction("Apple Music · MusicBrainz 에서 태그 가져오기…", self.tag_source)
         act = m.addMenu("액션")
         act.addAction("액션 그룹…", self.run_action_groups)
         act.addAction("빠른 액션…", self.quick_action)

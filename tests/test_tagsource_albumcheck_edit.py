@@ -110,9 +110,9 @@ def run_source(self):
     picked = []
     self._pick_release = lambda row: picked.append(self.releases[row].id if row >= 0 else None)
     self._show_results([ts.Release("a", "나중 앨범", "IU", "2020", count=10, country="kr"),
-                        ts.Release("b", "먼저 앨범", "IU", "2014", count=4, country="jp")])
-    cells = [[self.results.item(r, c).text() for c in range(5)] for r in range(2)]
-    check(cells == [["나중 앨범", "IU", "2020", "10", "한국"], ["먼저 앨범", "IU", "2014", "4", "일본"]],
+                        ts.Release("b", "먼저 앨범", "IU", "2014", count=4, country="jp", source="mb")])
+    cells = [[self.results.item(r, c).text() for c in range(6)] for r in range(2)]
+    check(cells == [["나중 앨범", "IU", "2020", "10", "한국", "Apple"], ["먼저 앨범", "IU", "2014", "4", "일본", "MB"]],
           f"검색 결과 표 {cells}")
     self.results.sortByColumn(2, Qt.AscendingOrder)
     self.results.setCurrentCell(0, 0)

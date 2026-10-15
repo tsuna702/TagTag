@@ -1,11 +1,14 @@
-"""Apple Music(iTunes 공개 API)에서 앨범 정보를 가져와 곡과 짝짓기 (Mp3tag 의 '태그 소스').
+"""Apple Music(iTunes 공개 API)·MusicBrainz 에서 앨범 정보를 가져와 곡과 짝짓기 (Mp3tag 의 '태그 소스').
 
-키가 필요 없는 iTunes Search/Lookup API 를 쓴다. 인터넷은 사용자가 검색·앨범을 고를 때만 쓴다.
+둘 다 키가 필요 없다. MusicBrainz 는 Apple Music 에 없는 앨범(애니·게임 OST 등)을 보충한다.
+인터넷은 사용자가 검색·앨범을 고를 때만 쓴다.
 """
 from __future__ import annotations
 
 import json
 import re
+import threading
+import time
 from collections import Counter
 from dataclasses import dataclass, field
 from urllib import parse
@@ -16,6 +19,11 @@ from .tagio import AudioFile
 from .ytclean import strip_noise
 
 COUNTRIES = {"kr": "한국", "jp": "일본", "us": "미국", "gb": "영국"}
+MB_COUNTRIES = {"xw": "전 세계", "xe": "유럽", "de": "독일", "fr": "프랑스", "tw": "대만", "cn": "중국", "hk": "홍콩"}
+SOURCES = {"apple": "Apple Music", "mb": "MusicBrainz"}
+MB_ROOT = "https://musicbrainz.org/ws/2/"
+# MusicBrainz 는 연락처가 든 User-Agent 를 요구하고 초당 1번까지만 받는다
+MB_HEADERS = {"User-Agent": "LocalTag ( https://github.com/tsuna702/TagTag )", "Accept": "application/json"}
 
 
 class SourceError(Exception):
@@ -48,18 +56,23 @@ class Release:
     count: int = 0
     artwork: str = ""
     copyright: str = ""
-    country: str = ""  # 찾은 스토어 (곡 목록도 먼저 여기서)
+    country: str = ""  # 찾은 스토어 (곡 목록도 먼저 여기서) · MusicBrainz 는 발매 국가
     tracks: list = field(default_factory=list)
+    source: str = "apple"  # apple / mb
+
+    def country_name(self) -> str:
+        return COUNTRIES.get(self.country) or MB_COUNTRIES.get(self.country) or self.country.upper()
 
     def label(self) -> str:
         bits = [x for x in (self.year, f"{self.count}곡" if self.count else "",
-                            COUNTRIES.get(self.country, self.country.upper()) if self.country else "") if x]
-        return f"{self.album} — {self.artist}" + (f"  ({', '.join(bits)})" if bits else "")
+                            self.country_name() if self.country else "") if x]
+        src = "  · MusicBrainz" if self.source == "mb" else ""
+        return f"{self.album} — {self.artist}" + (f"  ({', '.join(bits)})" if bits else "") + src
 
 
-def _json(url):
+def _json(url, headers=None):
     try:
-        return json.loads(art.fetch(url, 8 * 1024 * 1024))
+        return json.loads(art.fetch(url, 8 * 1024 * 1024, headers))
     except ValueError as e:
         raise SourceError("서버 응답을 읽지 못했습니다. 잠시 뒤 다시 해 보세요.") from e
     except art.ArtworkError as e:
@@ -171,6 +184,113 @@ def lookup(album_id: str, country: str = "kr") -> Release:
     rel.count = rel.count or len(rel.tracks)
     return rel
 
+
+# ------------------------------------------------------------------ MusicBrainz
+
+_mb_lock = threading.Lock()
+_mb_last = [0.0]
+
+
+def _mb_json(path, **params):
+    with _mb_lock:  # 초당 1번
+        wait = _mb_last[0] + 1.05 - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        try:
+            return _json(MB_ROOT + path + "?" + parse.urlencode({**params, "fmt": "json"}), MB_HEADERS)
+        finally:
+            _mb_last[0] = time.monotonic()
+
+
+def mbid_from(text: str):
+    """MusicBrainz 발매(release) 링크나 MBID → MBID 또는 None."""
+    m = re.fullmatch(r"\s*(?:https?://(?:\w+\.)?musicbrainz\.org/release/)?"
+                     r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\S*\s*", text.strip(), re.I)
+    return m.group(1).lower() if m else None
+
+
+def _credit(credits) -> str:
+    return "".join(a.get("name", "") + a.get("joinphrase", "") for a in credits or [])
+
+
+def _mb_release(x) -> Release:
+    rg = x.get("release-group") or {}
+    date = x.get("date") or rg.get("first-release-date") or ""
+    cover = (x.get("cover-art-archive") or {}).get("front")
+    return Release(x.get("id", ""), x.get("title", ""), _credit(x.get("artist-credit")), date[:4], "",
+                   int(x.get("track-count") or sum(m.get("track-count") or 0 for m in x.get("media") or [])),
+                   f"https://coverartarchive.org/release/{x.get('id')}/front" if cover else "",
+                   country=(x.get("country") or "").lower(), source="mb")
+
+
+def mb_search(term: str, limit: int = 25) -> list[Release]:
+    mbid = mbid_from(term)
+    if mbid:
+        return [mb_lookup(mbid)]
+    q = term.strip().replace('"', " ")
+    out = []
+    for x in _mb_json("release/", query=q, limit=limit).get("releases", []):
+        if (x.get("status") or "") == "Pseudo-Release" or int(x.get("score") or 0) < 40:
+            continue
+        out.append(_mb_release(x))
+    return out
+
+
+def mb_lookup(mbid: str) -> Release:
+    x = _mb_json("release/" + mbid, inc="recordings artist-credits release-groups genres")
+    if not x.get("id"):
+        raise SourceError("MusicBrainz 에서 앨범 정보를 찾지 못했습니다.")
+    rel = _mb_release(x)
+    rg = x.get("release-group") or {}
+    genres = sorted((x.get("genres") or []) + (rg.get("genres") or []), key=lambda g: -int(g.get("count") or 0))
+    rel.genre = genres[0]["name"].title() if genres else ""
+    media = [m for m in x.get("media") or [] if m.get("tracks")]
+    for m in media:
+        for i, t in enumerate(m["tracks"], 1):
+            num = int(t["position"]) if str(t.get("position", "")).isdigit() else i
+            rel.tracks.append(Track(int(m.get("position") or 1), len(media), num, len(m["tracks"]),
+                                    t.get("title", ""), _credit(t.get("artist-credit")) or rel.artist,
+                                    (t.get("length") or 0) / 1000))
+    rel.count = len(rel.tracks) or rel.count
+    return rel
+
+
+def find(term: str, country: str = "kr", musicbrainz: bool = True) -> list[Release]:
+    """Apple Music 결과 뒤에 MusicBrainz 결과를 붙인다 (한쪽이 실패해도 다른 쪽 결과는 보여 준다)."""
+    if mbid_from(term):
+        return [mb_lookup(mbid_from(term))]
+    apple, err = [], None
+    try:
+        apple = search(term, country)
+    except SourceError as e:
+        err = e
+    if album_id_from(term) or not musicbrainz:
+        if err:
+            raise err
+        return apple
+    try:
+        found = apple + mb_search(term)
+    except SourceError:
+        if err:
+            raise
+        return apple
+    # 검색어와 앨범 이름이 거의 같은 것을 출처에 상관없이 맨 위로 (나머지는 원래 순서)
+    return sorted(found, key=lambda r: similarity(r.album, term) < 0.85)
+
+
+def get(rel: Release, country: str = "kr") -> Release:
+    """검색 결과 하나의 곡 목록까지."""
+    return mb_lookup(rel.id) if rel.source == "mb" else lookup(rel.id, country)
+
+
+def cover_url(rel: Release, size: int) -> str:
+    if rel.source == "mb":  # Cover Art Archive 는 250·500·1200 과 원본만
+        return rel.artwork + ("-500" if size <= 600 else "-1200" if size <= 1500 else "")
+    from .extract import hi_res
+    return hi_res(rel.artwork, size)
+
+
+# ------------------------------------------------------------------ 검색어
 
 def guess_query(files) -> str:
     """고른 곡으로 검색어 만들기: '앨범 아티스트(또는 아티스트) 앨범', 없으면 폴더 이름."""
