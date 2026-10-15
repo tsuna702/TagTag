@@ -125,7 +125,7 @@ def prelookup(items, progress=lambda *_: None, cancelled=lambda: False) -> dict:
 # persistent ID 로 곡을 찾아 현재 Music에 보이는 정보를 읽거나(read), 다시 새로 읽게 한다(refresh).
 #   read:    인자 = read, <pid>, <pid>, …
 #   refresh: 인자 = refresh, <최소 대기 칸>, <최대 대기 칸>, <pid>, <제목>, <앨범>, <pid>, <제목>, <앨범>, …
-#            (한 칸 = 0.2초)
+#            (한 칸 = TICK 초)
 #   LOCALTAG_INFO:<pid>\t<제목>\t<앨범>\t<경로>
 # 새로 읽기는 한 곡씩, Music이 그 곡을 다 처리할 때까지 기다린 뒤 다음 곡으로 넘어간다:
 #   - 최소 대기 시간이 지났고
@@ -171,7 +171,7 @@ on run arguments
                         set seenTick to 0
                         set usedTick to maxTicks
                         repeat with tick from 1 to maxTicks
-                            delay 0.2
+                            delay 0.1
                             set curLoc to ""
                             try
                                 set curLoc to POSIX path of (get location of t)
@@ -189,7 +189,7 @@ on run arguments
                                 exit repeat
                             end if
                         end repeat
-                        -- 진단: 새 정보가 보인 시점 · 다음 곡으로 넘어간 시점 (칸 = 0.2초)
+                        -- 진단: 새 정보가 보인 시점 · 다음 곡으로 넘어간 시점 (칸 = 0.1초)
                         log "LOCALTAG_TIMING:" & pid & tab & seenTick & tab & usedTick & tab & (name of t as text) & tab & (album of t as text)
                     end if
                     set loc to ""
@@ -212,8 +212,11 @@ end run
 '''
 
 # 반영 속도: 곡 하나를 새로 읽게 한 뒤 다음 곡까지 (최소, 최대) 기다리는 시간(초)
-PACES = {"fast": (0.5, 4.0), "normal": (0.8, 6.0), "slow": (1.1, 10.0)}
-PACE_LABELS = {"fast": "빠르게 (곡마다 0.5초 이상)", "normal": "보통 (곡마다 0.8초 이상)",
+# 한 곡을 반영한 뒤 Music 상태를 확인하는 간격 (ID_SCRIPT 의 delay 와 같아야 한다).
+# 위치가 두 번 연속 같으면 안정된 것으로 보므로, 간격이 짧을수록 최소 대기 그대로 넘어갈 수 있다.
+TICK = 0.1
+PACES = {"fast": (0.4, 4.0), "normal": (0.8, 6.0), "slow": (1.1, 10.0)}
+PACE_LABELS = {"fast": "빠르게 (곡마다 0.4초 이상)", "normal": "보통 (곡마다 0.8초 이상)",
                "slow": "천천히 (곡마다 1.1초 이상)"}
 DEFAULT_PACE = "fast"  # 0.9.7 부터 저장 전에 곡을 찾아 두어 몰아서 반영되지 않으므로 빠르게도 갈라지지 않음
 
@@ -550,7 +553,7 @@ def refresh(paths, progress=lambda *_: None, cancelled=lambda: False, expected=N
         다른 값으로 바뀌었으면(반영하는 사이 Music 에서 직접 고친 경우) 다시 반영하지 않고 그 값을 따른다.
     """
     min_wait, max_wait = PACES.get(pace, PACES[DEFAULT_PACE])
-    ticks = [str(max(1, round(min_wait / 0.2))), str(max(2, round(max_wait / 0.2)))]
+    ticks = [str(max(1, round(min_wait / TICK))), str(max(2, round(max_wait / TICK)))]
     keys = list(dict.fromkeys(os.path.realpath(p) for p in paths))
     if not keys:
         raise MusicError("Music에 반영할 곡을 선택해 주세요.")
