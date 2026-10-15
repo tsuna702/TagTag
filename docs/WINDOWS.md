@@ -1,6 +1,6 @@
 # Windows 판 만들기
 
-Windows PC 에서 `windows` 브랜치로 작업한다. 기준 버전은 0.8.2 (macOS 판).
+Windows PC 에서 `windows` 브랜치로 작업한다. 기준 버전은 0.9.0 (macOS 판).
 화면(PySide6)과 태그 읽기·쓰기(mutagen)는 그대로 Windows 에서 돈다. 손볼 곳은 아래 맥 전용 부분이다.
 
 ## 시작하기 (Windows PC)
