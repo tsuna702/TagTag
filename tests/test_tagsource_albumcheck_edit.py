@@ -106,6 +106,18 @@ app.processEvents()
 
 
 def run_source(self):
+    # 검색 결과 표: 검색 순서 그대로, 정렬해도 고른 줄의 앨범을 받는다
+    picked = []
+    self._pick_release = lambda row: picked.append(self.releases[row].id if row >= 0 else None)
+    self._show_results([ts.Release("a", "나중 앨범", "IU", "2020", count=10, country="kr"),
+                        ts.Release("b", "먼저 앨범", "IU", "2014", count=4, country="jp")])
+    cells = [[self.results.item(r, c).text() for c in range(5)] for r in range(2)]
+    check(cells == [["나중 앨범", "IU", "2020", "10", "한국"], ["먼저 앨범", "IU", "2014", "4", "일본"]],
+          f"검색 결과 표 {cells}")
+    self.results.sortByColumn(2, Qt.AscendingOrder)
+    self.results.setCurrentCell(0, 0)
+    check(self.results.item(0, 0).text() == "먼저 앨범" and picked[-1] == "b", f"연도로 정렬 뒤 고르기 {picked}")
+    del self._pick_release
     self._set_release(rel)
     names = [f.filename for f in self.files]
     pairs = dict(zip(names, self.pairs))

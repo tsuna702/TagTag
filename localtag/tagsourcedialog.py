@@ -9,7 +9,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView,
-    QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton, QSplitter, QTableWidget, QTableWidgetItem,
+    QLabel, QLineEdit, QPushButton, QSplitter, QTableWidget, QTableWidgetItem,
     QVBoxLayout, QWidget,
 )
 
@@ -59,8 +59,20 @@ class TagSourceDialog(QDialog):
         v.addLayout(top)
 
         split = QSplitter(Qt.Horizontal)
-        self.results = QListWidget()
-        self.results.currentRowChanged.connect(self._pick_release)
+        self.results = QTableWidget(0, 5)
+        self.results.setHorizontalHeaderLabels(["앨범", "아티스트", "연도", "곡 수", "나라"])
+        self.results.verticalHeader().hide()
+        self.results.verticalHeader().setDefaultSectionSize(24)
+        self.results.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.results.setSelectionBehavior(QTableWidget.SelectRows)
+        self.results.setSelectionMode(QTableWidget.SingleSelection)
+        self.results.setWordWrap(False)
+        rh = self.results.horizontalHeader()
+        rh.setSectionResizeMode(QHeaderView.Interactive)
+        for c, w in enumerate((260, 140, 50, 50)):
+            self.results.setColumnWidth(c, w)
+        rh.setStretchLastSection(True)
+        self.results.currentCellChanged.connect(lambda row, *_: self._pick_release(self._release_row(row)))
         split.addWidget(self.results)
         right = QWidget()
         rv = QVBoxLayout(right)
@@ -94,7 +106,7 @@ class TagSourceDialog(QDialog):
         row.addWidget(hint, 1)
         rv.addLayout(row)
         split.addWidget(right)
-        split.setSizes([330, 850])
+        split.setSizes([520, 660])
         v.addWidget(split, 1)
 
         box = QGroupBox("넣을 정보")
@@ -151,15 +163,31 @@ class TagSourceDialog(QDialog):
 
     def _show_results(self, releases):
         self.releases = releases
-        self.results.clear()
-        for r in releases:
-            it = QListWidgetItem(r.label())
-            it.setToolTip(r.label())
-            self.results.addItem(it)
+        t = self.results
+        t.setSortingEnabled(False)
+        t.clearContents()
+        t.setRowCount(len(releases))
+        for i, r in enumerate(releases):
+            cells = (r.album, r.artist, int(r.year) if r.year.isdigit() else r.year, r.count or "",
+                     ts.COUNTRIES.get(r.country, r.country.upper()))
+            for c, val in enumerate(cells):
+                it = QTableWidgetItem()
+                it.setData(Qt.DisplayRole, val)
+                if c >= 2:
+                    it.setTextAlignment(Qt.AlignCenter)
+                it.setToolTip(r.label())
+                it.setData(Qt.UserRole, i)
+                t.setItem(i, c, it)
+        t.horizontalHeader().setSortIndicator(-1, Qt.AscendingOrder)  # 처음엔 검색 순서 그대로
+        t.setSortingEnabled(True)  # 머리글을 눌러 연도·곡 수로 정렬
         if not releases:
             self.album_label.setText("찾은 앨범이 없습니다. 검색어를 바꾸거나 Apple Music 앨범 링크를 붙여 넣어 보세요.")
         else:
-            self.results.setCurrentRow(0)
+            t.setCurrentCell(0, 0)
+
+    def _release_row(self, row):
+        it = self.results.item(row, 0)
+        return it.data(Qt.UserRole) if it else -1
 
     def _pick_release(self, row):
         if not (0 <= row < len(getattr(self, "releases", []))):
