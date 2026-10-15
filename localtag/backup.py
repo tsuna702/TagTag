@@ -95,8 +95,14 @@ class BackupJob:
         if sync:
             os.fsync(self._log.fileno())
 
-    def before(self, path: str, copy_file: bool) -> dict:
-        """파일을 바꾸기 직전에 부른다. copy_file이 False면 이름 바꾸기만 기록."""
+    def sync(self):
+        """덧붙인 기록을 디스크에 확정한다 (before(sync=False) 를 몇 개 부른 뒤 한 번에)."""
+        self._log.flush()
+        os.fsync(self._log.fileno())
+
+    def before(self, path: str, copy_file: bool, sync: bool = True) -> dict:
+        """파일을 바꾸기 직전에 부른다. copy_file이 False면 이름 바꾸기만 기록.
+        sync=False 면 기록의 디스크 확정은 sync() 로 따로 한다 — 원본을 바꾸기 전에 반드시 sync()."""
         entry = {"before": path, "after": path, "backup": None, "state": "planned", "size": 0}
         if copy_file:
             name = uuid.uuid4().hex + os.path.splitext(path)[1]
@@ -110,7 +116,7 @@ class BackupJob:
             entry["size"] = os.path.getsize(dest)
         self._index[id(entry)] = len(self.data["entries"])
         self.data["entries"].append(entry)
-        self._append(entry, sync=True)  # 원본을 바꾸기 전에 기록이 디스크에 남아 있어야 한다
+        self._append(entry, sync=sync)  # 원본을 바꾸기 전에 기록이 디스크에 남아 있어야 한다
         return entry
 
     def after(self, entry: dict, new_path: str):

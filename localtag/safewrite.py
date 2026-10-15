@@ -1,6 +1,7 @@
 """안전 저장: 사본에 쓰고 검증한 뒤 원본에 반영한다 (앨범태그 core.py 방식).
 
 - 사본은 같은 APFS 디스크면 복제본(clone)으로 만들어 즉시 끝난다
+  (Windows 는 메모리에 둔다 — 디스크에 새로 만든 파일은 열 때마다 백신 검사로 느려진다)
 - 오디오 데이터(MP3 프레임, FLAC 프레임, M4A mdat)가 바이트 단위로 그대로인지 확인
 - 원본에는 달라진 부분만 다시 쓴다 (파일 번호 유지, 오디오 데이터는 다시 쓰지 않음)
 - 작업 도중 다른 프로그램이 원본을 바꿨으면 교체하지 않음
@@ -8,7 +9,9 @@
 """
 from __future__ import annotations
 
+import contextlib
 import ctypes
+import io
 import os
 import shutil
 import stat
@@ -39,6 +42,30 @@ else:  # Windows 에는 pread/pwrite 가 없다 — 한 fd 를 한 스레드에�
     def _pwrite(fd, data, off):
         os.lseek(fd, off, os.SEEK_SET)
         return os.write(fd, data)
+
+# Windows 는 작업 사본을 메모리에 둔다: 디스크에 새로 만든 파일은 열 때마다 백신(Defender)이 검사해
+# 곡마다 몇 ms 씩 든다 (300곡 저장 6.6초 중 약 3초). 이보다 큰 파일은 예전처럼 디스크 사본.
+MEM_STAGE = IS_WIN
+MEM_STAGE_LIMIT = 256 * 1024 * 1024
+
+
+class MemStage(io.BytesIO):
+    """메모리에 둔 작업 사본. name 은 원본 경로 (확장자로 형식을 가린다)."""
+
+    def __init__(self, data: bytes, name: str):
+        super().__init__(data)
+        self.name = name
+
+
+def rewind(target):
+    """mutagen 에 넘기기 전에: 경로는 그대로, 메모리 사본은 처음으로 되감는다 (mutagen 은 지금 위치부터 읽는다)."""
+    if not isinstance(target, str):
+        target.seek(0)
+    return target
+
+
+def _ext(target) -> str:
+    return os.path.splitext(target if isinstance(target, str) else target.name)[1].lower()
 
 
 class SafeWriteError(Exception):
@@ -119,13 +146,23 @@ def _fsync(path: str):
         os.close(fd)
 
 
-def payload_regions(path: str) -> list[tuple[int, int]] | None:
-    """태그를 뺀 압축 오디오 데이터의 위치 [(시작, 길이)]. 확인할 수 없는 형식이면 None."""
-    ext = os.path.splitext(path)[1].lower()
+def _reader(target):
+    """경로면 열고, 메모리 사본이면 그대로 (닫지 않는다)."""
+    if isinstance(target, str):
+        return open(target, "rb")
+    target.seek(0)
+    return contextlib.nullcontext(target)
+
+
+def payload_regions(path) -> list[tuple[int, int]] | None:
+    """태그를 뺀 압축 오디오 데이터의 위치 [(시작, 길이)]. 확인할 수 없는 형식이면 None. path 는 경로 또는 메모리 사본."""
+    ext = _ext(path)
     if ext not in (".mp3", ".flac", ".m4a", ".m4b", ".mp4", ".m4r"):
         return None
-    with open(path, "rb") as f:
-        size = os.fstat(f.fileno()).st_size
+    with _reader(path) as f:
+        f.seek(0, 2)
+        size = f.tell()
+        f.seek(0)
         regions = []
         if ext == ".mp3":
             head = f.read(10)
@@ -188,14 +225,16 @@ def _same_bytes(fa, fb, ra, rb) -> bool:
         off = 0
         while off < n:
             k = min(CHUNK, n - off)
-            a = _pread(fa, k, sa + off)
-            if len(a) != k or a != _pread(fb, k, sb + off):
+            fa.seek(sa + off)
+            fb.seek(sb + off)
+            a = fa.read(k)
+            if len(a) != k or a != fb.read(k):
                 return False
             off += k
     return True
 
 
-def same_payload(original: str, modified: str) -> bool | None:
+def same_payload(original: str, modified) -> bool | None:
     """두 파일의 오디오 데이터가 바이트 단위로 같은지. 원본 형식을 확인할 수 없으면 None."""
     ra = payload_regions(original)
     if ra is None:
@@ -203,17 +242,13 @@ def same_payload(original: str, modified: str) -> bool | None:
     rb = payload_regions(modified)
     if rb is None or [n for _, n in ra] != [n for _, n in rb]:
         return False
-    fa, fb = os.open(original, os.O_RDONLY | O_BINARY), os.open(modified, os.O_RDONLY | O_BINARY)
-    try:
+    with _reader(original) as fa, _reader(modified) as fb:
         return _same_bytes(fa, fb, ra, rb)
-    finally:
-        os.close(fa)
-        os.close(fb)
 
 
 def _length(path):
     try:
-        mf = mutagen.File(path)
+        mf = mutagen.File(rewind(path))
     except Exception:
         return None
     return None if mf is None else round(float(getattr(mf.info, "length", 0) or 0), 2)
@@ -233,6 +268,8 @@ def error_text(e: Exception) -> str:
 def safe_modify(path: str, fn, enabled: bool = True, keep_mtime: bool = False, inspect=None):
     """fn(작업할_경로)로 태그를 바꾼다. enabled면 사본에서 작업하고 검증 후 원본에 반영.
 
+    작업 사본은 디스크 파일 경로이거나 (Windows) 메모리 사본(MemStage)이다 — fn·inspect 는
+    mutagen 에 넘기기 전에 rewind() 를 거친다.
     fn 이 바꾸기 전 재생 시간(초)을 돌려주면 그것을 쓰고, 아니면 따로 읽는다.
     inspect(경로) 가 있으면 바뀐 파일을 읽은 결과(.length 가 있는 객체)를 돌려준다 —
     검증에 쓴 것을 그대로 돌려주므로 저장 뒤 파일을 다시 읽지 않아도 된다.
@@ -249,7 +286,11 @@ def safe_modify(path: str, fn, enabled: bool = True, keep_mtime: bool = False, i
     result = None
     try:
         try:
-            copy_preserving(path, stage)
+            if MEM_STAGE and st.st_size <= MEM_STAGE_LIMIT:
+                with open(path, "rb") as f:
+                    stage = MemStage(f.read(), path)
+            else:
+                copy_preserving(path, stage)
         except PermissionError as e:
             if IS_WIN and getattr(e, "winerror", 0) == 32:  # 공유 위반: 다른 프로그램이 열어 둠
                 raise SafeWriteError(IN_USE) from e
@@ -289,17 +330,17 @@ def safe_modify(path: str, fn, enabled: bool = True, keep_mtime: bool = False, i
         if keep_mtime:
             os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
     finally:
-        if not keep_stage and os.path.exists(stage):
+        if isinstance(stage, str) and not keep_stage and os.path.exists(stage):
             os.unlink(stage)
     return result
 
 
-def _differing_chunks(s, d, size, protect):
+def _differing_chunks(read_src, d, size, protect):
     """같은 위치끼리 비교해 다른 조각 [(위치, 길이)]. protect(오디오 위치) 안이 다르면 SafeWriteError."""
     chunks = []
     off = 0
     while off < size:
-        a = _pread(s, CHUNK, off)
+        a = read_src(min(CHUNK, size - off), off)
         if not a:
             raise SafeWriteError("작업 사본을 읽지 못했습니다. 원본은 그대로입니다.")
         b = _pread(d, len(a), off)
@@ -314,8 +355,8 @@ def _differing_chunks(s, d, size, protect):
     return chunks
 
 
-def write_back(src: str, dst: str, protect=None):
-    """검증한 사본(src)의 내용을 원본(dst) 파일 안에 다시 쓴다.
+def write_back(src, dst: str, protect=None):
+    """검증한 사본(src: 경로 또는 메모리 사본)의 내용을 원본(dst) 파일 안에 다시 쓴다.
 
     파일을 통째로 바꿔치기(os.replace)하면 내용이 같아도 다른 파일(새 inode)이 되어,
     파일 번호로 곡 위치를 기억하는 Apple Music이 저장 직후 곡을 잠깐 찾지 못한다.
@@ -324,7 +365,20 @@ def write_back(src: str, dst: str, protect=None):
     protect: 바뀌면 안 되는 위치 [(시작, 길이)] — 비교할 때 다르면 아무것도 쓰지 않고 SafeWriteError.
     쓰는 도중에 실패하면 사본으로 원본을 교체해 반쯤 쓰인 파일이 남지 않게 한다.
     """
-    s = os.open(src, os.O_RDONLY | O_BINARY)
+    if isinstance(src, str):
+        s = os.open(src, os.O_RDONLY | O_BINARY)
+        size = os.fstat(s).st_size
+
+        def read_src(n, off):
+            return _pread(s, n, off)
+    else:
+        s = None
+        data = src.getvalue()
+        size = len(data)
+
+        def read_src(n, off):
+            return data[off:off + n]
+    touched = False  # 원본에 쓰기 시작했는지
     try:
         try:
             d = os.open(dst, os.O_RDWR | O_BINARY)
@@ -336,14 +390,14 @@ def write_back(src: str, dst: str, protect=None):
             d = None
         if d is not None:
             try:
-                size = os.fstat(s).st_size
                 try:
-                    chunks = _differing_chunks(s, d, size, protect)
+                    chunks = _differing_chunks(read_src, d, size, protect)
                 except OSError as e:
                     raise SafeWriteError(f"원본과 비교하지 못했습니다. 원본은 그대로입니다.\n{e}") from e
+                touched = True
                 try:
                     for off, n in chunks:
-                        a = _pread(s, n, off)
+                        a = read_src(n, off)
                         done = 0
                         while done < n:
                             done += _pwrite(d, a[done:], off + done)
@@ -352,7 +406,7 @@ def write_back(src: str, dst: str, protect=None):
                     os.fsync(d)
                     # 쓴 부분을 다시 읽어 확인 (나머지는 쓰기 전에 같다는 것을 확인했다)
                     for off, n in chunks:
-                        if _pread(d, n, off) != _pread(s, n, off):
+                        if _pread(d, n, off) != read_src(n, off):
                             raise SafeWriteError("덮어쓴 내용 확인에 실패했습니다.")
                     if os.fstat(d).st_size != size:
                         raise SafeWriteError("덮어쓴 파일 크기가 다릅니다.")
@@ -362,8 +416,21 @@ def write_back(src: str, dst: str, protect=None):
             finally:
                 os.close(d)
     finally:
-        os.close(s)
+        if s is not None:
+            os.close(s)
     # 원본을 열 수 없거나 반쯤 쓰였을 수 있으므로 검증된 사본으로 교체한다 (내용은 올바름)
+    if not isinstance(src, str):  # 메모리 사본은 이때만 디스크에 내려놓는다
+        path = os.path.join(os.path.dirname(dst), f"{STAGE_PREFIX}{uuid.uuid4().hex}{os.path.splitext(dst)[1]}")
+        try:
+            with open(path, "xb") as f:
+                f.write(data)
+        except OSError as e:
+            if os.path.exists(path):
+                os.unlink(path)
+            msg = ("원본에 쓰다가 실패해 일부만 바뀌었을 수 있습니다. 백업에서 되돌려 주세요." if touched
+                   else "원본을 다시 쓰지 못했습니다. 원본은 그대로입니다.")
+            raise SafeWriteError(f"{msg}\n{e}") from e
+        src = path
     try:
         _fsync(src)
         os.replace(src, dst)

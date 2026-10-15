@@ -47,6 +47,10 @@ Mp3tag 를 본뜬 음악 태그 편집기. Python 3 + PySide6(Qt) + mutagen. Git
 - 주석·docstring·UI 문구는 한국어, 짧게. 주변 코드의 말투와 밀도에 맞춘다.
 - 태그 쓰기는 **안전 저장**(`safewrite.safe_modify`): 사본에 쓰고 오디오 데이터가 바이트 단위로 같은지 확인한 뒤
   원본에는 달라진 부분만 다시 쓴다 (파일 번호가 그대로라 Music 이 곡을 놓치지 않는다). 이 흐름을 우회하지 않는다.
+  Windows 는 작업 사본을 **메모리**(`MemStage`)에 둔다 — 디스크에 새로 만든 파일은 열 때마다 Defender 가 검사해
+  곡당 몇 ms 씩 든다 (1.0.1: 300곡 저장 6.6초 → 2.1초). 그래서 사본을 받는 함수는 경로 대신 파일 객체도 받을 수 있고,
+  mutagen 에 넘길 때는 꼭 `rewind(path)` 를 거친다 (`mf.save()` 처럼 인자 없이 부르지 말고 `mf.save(rewind(path))`).
+- 백업 기록(journal.log)은 `BACKUP_BATCH` 곡씩 백업 사본을 먼저 만들고 한 번에 fsync 한다 — 원본을 바꾸기 전에 확정된다.
 - 파일을 바꾸는 작업은 `Plan` 목록을 만들어 `MainWindow.apply_plans` 로 적용한다 → 백업·실행 취소·Music 반영이 따라온다.
 - 열 추가는 `model.COLUMNS` **끝에** 붙인다 (저장해 둔 열 배치가 어긋나지 않게).
 - 무거운 창 모듈은 함수 안에서 import 하고 `MainWindow._preload` 목록에도 넣는다.

@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 
 import mutagen
 
-from .safewrite import safe_modify
+from .safewrite import rewind, safe_modify
 from mutagen.aiff import AIFF
 from mutagen.apev2 import APEBinaryValue, APEv2File
 from mutagen.asf import ASF, ASFByteArrayAttribute
@@ -662,12 +662,16 @@ def _asf_write(tags, changes, pictures):
 
 # ---------------------------------------------------------------- AudioFile
 
-def _has_id3v1(path: str) -> bool:
+def _has_id3v1(path) -> bool:
+    """path: 경로 또는 메모리 작업 사본."""
     try:
+        if not isinstance(path, str):
+            path.seek(-128, os.SEEK_END)
+            return path.read(3) == b"TAG"
         with open(path, "rb") as f:
             f.seek(-128, os.SEEK_END)
             return f.read(3) == b"TAG"
-    except OSError:
+    except (OSError, ValueError):
         return False
 
 
@@ -792,7 +796,7 @@ class AudioFile:
     @classmethod
     def load(cls, path: str, opts: Options) -> "AudioFile":
         try:
-            mf = mutagen.File(path)
+            mf = mutagen.File(rewind(path))
         except Exception as e:
             raise UnsupportedFile(str(e)) from e
         if mf is None:
@@ -801,10 +805,14 @@ class AudioFile:
         if kind == "unknown":
             raise UnsupportedFile(type(mf).__name__)
 
-        af = cls(path=path)
-        st = os.stat(path)
-        af.size, af.mtime = st.st_size, st.st_mtime
-        af.dev, af.ino = st.st_dev, st.st_ino
+        if isinstance(path, str):
+            af = cls(path=path)
+            st = os.stat(path)
+            af.size, af.mtime = st.st_size, st.st_mtime
+            af.dev, af.ino = st.st_dev, st.st_ino
+        else:  # 메모리 작업 사본 (저장 검증) — 경로·파일 정보는 _adopt 가 원본 것으로 채운다
+            af = cls(path=path.name)
+            af.size = len(path.getbuffer())
         info = mf.info
         af.length = float(getattr(info, "length", 0) or 0)
         af.bitrate = int(getattr(info, "bitrate", 0) or 0)
@@ -870,7 +878,7 @@ class AudioFile:
         hook = self._snapshot_hook(snapshot)
 
         def write(path):
-            mf = mutagen.File(path)
+            mf = mutagen.File(rewind(path))
             hook(mf, path)
             before = _info_length(mf)
             kind = _kind(mf)
@@ -883,30 +891,30 @@ class AudioFile:
                 if v2 == 3:
                     tags.update_to_v23()
                 if isinstance(mf, (MP3, TrueAudio)):
-                    tags.save(path, v1=2 if opts.write_id3v1 else 1, v2_version=v2)
+                    tags.save(rewind(path), v1=2 if opts.write_id3v1 else 1, v2_version=v2)
                 else:
-                    mf.save(v2_version=v2)
+                    mf.save(rewind(path), v2_version=v2)
             elif kind == "mp4":
                 _mp4_write(tags, changes, pictures)
-                mf.save()
+                mf.save(rewind(path))
             elif kind == "flac":
                 _vorbis_write(tags, changes)
                 if pictures is not None:
                     mf.clear_pictures()
                     for p in pictures:
                         mf.add_picture(_flac_pic(p))
-                mf.save()
+                mf.save(rewind(path))
             elif kind == "ogg":
                 _vorbis_write(tags, changes)
                 if pictures is not None:
                     _ogg_write_pics(tags, pictures)
-                mf.save()
+                mf.save(rewind(path))
             elif kind == "ape":
                 _ape_write(tags, changes, pictures)
-                mf.save()
+                mf.save(rewind(path))
             elif kind == "asf":
                 _asf_write(tags, changes, pictures)
-                mf.save()
+                mf.save(rewind(path))
             else:
                 raise UnsupportedFile("쓰기를 지원하지 않는 형식")
             return before
@@ -921,23 +929,23 @@ class AudioFile:
         hook = self._snapshot_hook(snapshot)
 
         def write(path):
-            mf = mutagen.File(path)
+            mf = mutagen.File(rewind(path))
             hook(mf, path)
             before = _info_length(mf)
             kind = _kind(mf)
             if kind == "id3" and isinstance(mf, (MP3, TrueAudio)):
                 from mutagen.id3 import delete as id3_delete
-                id3_delete(path, delete_v1=True, delete_v2=True)
+                id3_delete(rewind(path), delete_v1=True, delete_v2=True)
             elif kind == "flac":
-                mf.delete()
+                mf.delete(rewind(path))
                 mf.clear_pictures()
-                mf.save()
+                mf.save(rewind(path))
             elif mf.tags is not None:
                 try:
-                    mf.delete()
+                    mf.delete(rewind(path))
                 except Exception:
                     mf.tags.clear()
-                    mf.save()
+                    mf.save(rewind(path))
             return before
 
         return self._saved(safe_modify(self.path, write, opts.safe_save, opts.keep_mtime,
@@ -1034,7 +1042,7 @@ def _blob_size(blobs, seen):
 
 def take_snapshot(path: str) -> Snapshot:
     st = os.stat(path)
-    return _snapshot_of(mutagen.File(path), path, (st.st_atime, st.st_mtime))
+    return _snapshot_of(mutagen.File(rewind(path)), path, (st.st_atime, st.st_mtime))
 
 
 def _snapshot_of(mf, path: str, times) -> Snapshot:
@@ -1081,7 +1089,7 @@ def restore_snapshot(path: str, snap: Snapshot, safe: bool = True, opts: Options
 
 
 def _restore_into(path: str, snap: Snapshot):
-    mf = mutagen.File(path)
+    mf = mutagen.File(rewind(path))
     before = _info_length(mf)
     kind = snap.kind
     if kind == "id3":
@@ -1090,18 +1098,18 @@ def _restore_into(path: str, snap: Snapshot):
         if tags is None:
             if is_mp3:
                 from mutagen.id3 import delete as id3_delete
-                id3_delete(path, delete_v1=True, delete_v2=True)
+                id3_delete(rewind(path), delete_v1=True, delete_v2=True)
             elif mf.tags is not None:
-                mf.delete()
+                mf.delete(rewind(path))
         else:
             v2 = tags.version[1] if tags.version[0] == 2 and tags.version[1] in (3, 4) else 4
             if v2 == 3:
                 tags.update_to_v23()
             if is_mp3:
-                tags.save(path, v1=2 if snap.had_v1 else 0, v2_version=v2)
+                tags.save(rewind(path), v1=2 if snap.had_v1 else 0, v2_version=v2)
             else:
                 mf.tags = tags
-                mf.save(v2_version=v2)
+                mf.save(rewind(path), v2_version=v2)
     elif kind == "flac":
         items, pics = snap.data
         if mf.tags is None:
@@ -1112,23 +1120,23 @@ def _restore_into(path: str, snap: Snapshot):
         mf.clear_pictures()
         for p in pics:
             mf.add_picture(copy.deepcopy(p))
-        mf.save()
+        mf.save(rewind(path))
     elif kind in ("ogg", "asf"):
         if mf.tags is None:
             mf.add_tags()
         del mf.tags[:]
         if snap.data:
             mf.tags.extend(copy.deepcopy(snap.data))
-        mf.save()
+        mf.save(rewind(path))
     elif kind in ("mp4", "ape"):
         if snap.data is None:
             if mf.tags is not None:
-                mf.delete()
+                mf.delete(rewind(path))
         else:
             if mf.tags is None:
                 mf.add_tags()
             mf.tags.clear()
             for k, v in snap.data.items():
                 mf.tags[k] = copy.deepcopy(v)
-            mf.save()
+            mf.save(rewind(path))
     return before

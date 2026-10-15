@@ -75,6 +75,7 @@ def _app_icon():
 LOAD_WORKERS = 4
 UNDO_LEVELS = 30
 UNDO_MEMORY = 512 * 1024 * 1024  # 실행 취소 기록이 이보다 커지면 오래된 것부터 버린다
+BACKUP_BATCH = 32  # 백업 기록을 이만큼씩 모아 디스크에 확정한다 (곡마다 fsync 하면 Windows 에서 곡당 약 2ms)
 
 
 class MainWindow(QMainWindow):
@@ -830,6 +831,25 @@ class MainWindow(QMainWindow):
                 plans.append(p)
         self.apply_plans(plans, "태그 저장", refresh_panel=refresh_panel)
 
+    @staticmethod
+    def _prepare_backups(job, plans, start):
+        """plans[start:start+BACKUP_BATCH] 의 백업 사본을 먼저 만들고 기록을 한 번에 디스크에 확정한다.
+        {번호: 백업 항목 또는 그 곡에서 난 오류}. 원본은 이 뒤에야 바꾸므로 '바꾸기 전에 기록' 은 그대로 지켜진다
+        (손대기 전에 앱이 꺼지면 남는 항목은 내용이 같은 원본을 가리킬 뿐이다)."""
+        out = {}
+        for j in range(start, min(start + BACKUP_BATCH, len(plans))):
+            p = plans[j]
+            if p.touches_tags or p.new_path:
+                try:
+                    out[j] = job.before(p.file.path, copy_file=p.touches_tags, sync=False)
+                except Exception as e:
+                    out[j] = e
+        try:
+            job.sync()
+        except OSError as e:  # 기록을 확정하지 못했으면 이 묶음의 곡은 바꾸지 않는다
+            out = {j: v if isinstance(v, Exception) else e for j, v in out.items()}
+        return out
+
     def apply_plans(self, plans, label, refresh_panel=True):
         """작업 목록을 실제 파일에 적용하고 실행 취소 기록을 남긴다."""
         # Music이 그사이 파일을 옮겼을 수 있으므로 먼저 새 위치를 찾는다
@@ -856,16 +876,22 @@ class MainWindow(QMainWindow):
             prog = QProgressDialog("적용하는 중…", None, 0, len(plans), self)
             prog.setWindowModality(Qt.WindowModal)
             prog.setMinimumDuration(300)
+        prepared = {}
         for i, p in enumerate(plans):
             if prog:
                 prog.setValue(i)
+            if job is not None and i % BACKUP_BATCH == 0:
+                prepared = self._prepare_backups(job, plans, i)
             f = p.file
             old_path = f.path
             held = []  # 실행 취소용 스냅샷 — 첫 저장 때 파일을 읽으면서 함께 만든다 (따로 읽지 않는다)
             bentry = None
             try:
                 if job is not None and (p.touches_tags or p.new_path):
-                    bentry = job.before(old_path, copy_file=p.touches_tags)
+                    bentry = prepared.pop(i)
+                    if isinstance(bentry, Exception):
+                        err, bentry = bentry, None
+                        raise err
                 new = f
                 if p.remove_tags:
                     new = new.remove_tags(self.opts, snapshot=held)
