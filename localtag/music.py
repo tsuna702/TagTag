@@ -581,6 +581,76 @@ def refresh(paths, progress=lambda *_: None, cancelled=lambda: False, expected=N
     return res
 
 
+# ------------------------------------------------------------------ Music 다시 켜기
+# 앨범 이름 등을 바꿔 반영하면 Music 보관함 데이터는 맞는데 앨범 화면에서 곡이 갈라져 보일 때가 있다.
+# Music 을 다시 켜면 합쳐지므로, 반영이 끝난 뒤 다시 켠다.
+RESTART_MODES = {"never": "하지 않기", "idle": "재생 중이 아닐 때만", "always": "항상 (듣던 곡을 이어서 재생)"}
+DEFAULT_RESTART = "idle"
+
+PLAYER_STATE = '''tell application "Music"
+    set playerState to player state as string
+    set trackID to ""
+    set trackPos to 0
+    if playerState is "playing" or playerState is "paused" then
+        try
+            set trackID to persistent ID of current track
+            set trackPos to player position
+        end try
+    end if
+    return playerState & tab & trackID & tab & (trackPos as string)
+end tell'''
+
+RESUME = '''on run argv
+    set trackID to item 1 of argv
+    set trackPos to (item 2 of argv) as real
+    tell application "Music"
+        set t to (first track of library playlist 1 whose persistent ID is trackID)
+        play t
+        set player position to trackPos
+        if item 3 of argv is "paused" then pause
+    end tell
+end run'''
+
+
+def _music_running() -> bool:
+    return subprocess.run(["/usr/bin/pgrep", "-x", "Music"], capture_output=True).returncode == 0
+
+
+def restart(mode=DEFAULT_RESTART, progress=lambda *_: None) -> str:
+    """Music 을 종료했다가 다시 켠다. 돌려주는 값: 'restarted' · 'playing'(재생 중이라 건너뜀) · 'notrunning' · 'never'."""
+    if mode == "never":
+        return "never"
+    if not _music_running():
+        return "notrunning"
+    st, pid, pos = (_osascript(PLAYER_STATE, timeout=30).strip().split("\t") + ["", "", "0"])[:3]
+    if st == "playing" and mode != "always":
+        return "playing"
+    progress(0, 1, "Music 다시 켜는 중 (앨범 화면 정리)")
+    _osascript('tell application "Music" to quit', timeout=30)
+    for _ in range(150):  # 최대 15초
+        if not _music_running():
+            break
+        time.sleep(0.1)
+    else:
+        raise MusicError("Music 이 종료되지 않았습니다. 직접 종료했다가 다시 켜 주세요.")
+    # 앞으로 가져오지 않고 뒤에서 켠다 (LocalTag 를 쓰던 흐름을 끊지 않게)
+    subprocess.run(["/usr/bin/open", "-g", "-b", "com.apple.Music"], capture_output=True, timeout=30)
+    for _ in range(300):  # 응답할 때까지 최대 30초
+        try:
+            if _osascript('tell application "Music" to get name', timeout=5).strip():
+                break
+        except MusicError:
+            pass
+        time.sleep(0.1)
+    if pid and st in ("playing", "paused"):
+        try:
+            _osascript(RESUME, pid, pos or "0", st, timeout=30)
+        except MusicError:
+            pass  # 이어서 재생은 못 해도 다시 켜기는 끝났다
+    progress(1, 1, "Music 을 다시 켰습니다")
+    return "restarted"
+
+
 def selected_paths():
     """Music에서 지금 선택한 곡들의 파일 경로."""
     out = _osascript(SELECTION_SCRIPT, timeout=60)

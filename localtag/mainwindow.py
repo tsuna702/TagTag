@@ -359,6 +359,16 @@ class MainWindow(QMainWindow):
         self._act(m, "Apple Music에 반영 (새로 읽기)", self.music_refresh, "Ctrl+Shift+M")
         self._act(m, "저장한 뒤 자동으로 Music에 반영", lambda on: self.settings.setValue("music_auto", on),
                   checkable=True, checked=self.settings.value("music_auto", False, bool))
+        sub2 = m.addMenu("반영한 뒤 Music 다시 켜기 (앨범이 갈라져 보이지 않게)")
+        grp2 = QActionGroup(self)
+        cur2 = self.settings.value("music_restart", music.DEFAULT_RESTART, str)
+        for key, label in music.RESTART_MODES.items():
+            a = self._act(sub2, label, lambda on, key=key: on and self.settings.setValue("music_restart", key),
+                          checkable=True, checked=key == cur2)
+            grp2.addAction(a)
+        sub2.addSeparator()
+        note = sub2.addAction("앨범·앨범 아티스트·컴필레이션·디스크를 바꿨을 때만")
+        note.setEnabled(False)
         sub = m.addMenu("반영 속도")
         grp = QActionGroup(self)
         cur = self.settings.value("music_pace", music.DEFAULT_PACE, str)
@@ -829,6 +839,8 @@ class MainWindow(QMainWindow):
                 self.panel.set_files(self.selected_files())
             return
         entry = UndoEntry(label)
+        # 앨범을 이루는 값이 바뀌면 Music 앨범 화면이 갈라져 보일 수 있다 → 반영 뒤 Music 다시 켜기
+        entry.album_change = any(p.remove_tags or set(p.changes) & ALBUM_KEYS for p in plans)
         job = None
         if self.backup_enabled:
             try:
@@ -895,7 +907,7 @@ class MainWindow(QMainWindow):
             self._push_undo(entry)
             if IS_MAC and self.settings.value("music_auto", False, bool):
                 changed = [i.new_path for i in entry.items]
-                self._music_refresh_paths(changed, modal=False)
+                self._music_refresh_paths(changed, modal=False, album_change=entry.album_change)
         if refresh_panel:
             self.panel.set_files(self.selected_files())
         self._update_status()
@@ -977,7 +989,8 @@ class MainWindow(QMainWindow):
         bad = {p for p, _ in failed}
         restored_paths = [i.old_path for i in entry.items if i.new_path not in bad and os.path.exists(i.old_path)]
         if IS_MAC and restored_paths and self.settings.value("music_auto", False, bool):
-            self._music_refresh_paths(restored_paths, modal=False)
+            self._music_refresh_paths(restored_paths, modal=False,
+                                      album_change=getattr(entry, "album_change", True))
 
     # ------------------------------------------------------------ 변환기 · 액션
     def _files_for_command(self):
@@ -1203,14 +1216,15 @@ class MainWindow(QMainWindow):
     def music_refresh(self):
         files = self._files_for_command()
         if files:
-            self._music_refresh_paths([f.path for f in files], modal=True)
+            self._music_refresh_paths([f.path for f in files], modal=True, album_change=True)
 
-    def _music_refresh_paths(self, paths, modal=True):
+    def _music_refresh_paths(self, paths, modal=True, album_change=False):
         if getattr(self, "_music_busy", False):
             self.statusBar().showMessage("Music 작업이 이미 진행 중입니다.", 4000)
             return
         self._music_busy = True
         pace = self.settings.value("music_pace", music.DEFAULT_PACE, str)
+        restart_mode = self.settings.value("music_restart", music.DEFAULT_RESTART, str) if album_change else "never"
         # Music에 보여야 할 값 (제목·앨범) — 반영됐는지 확인하는 데 쓴다
         by_path = {f.path: f for f in self.model.files}
         expected = {p: (by_path[p].get("title").split("\\\\")[0], by_path[p].get("album").split("\\\\")[0])
@@ -1229,6 +1243,12 @@ class MainWindow(QMainWindow):
                 parts.append(f"실패 {len(res.failed)}곡")
             if moved:
                 parts.append(f"옮겨진 파일 {moved}개 다시 연결")
+            if res.restart == "restarted":
+                parts.append("Music 다시 켬 (앨범 화면 정리)")
+            elif res.restart == "playing":
+                parts.append("재생 중이라 Music 을 다시 켜지 않음 — 앨범이 갈라져 보이면 Music 을 다시 켜 주세요")
+            elif res.restart and res.restart.startswith("실패"):
+                parts.append(f"Music 다시 켜기 {res.restart}")
             if res.changed:
                 # 반영하는 사이 Music 에서 직접 고친 곡 — 그 값을 따르고 목록을 다시 읽는다
                 parts.append(f"Music에서 고친 값을 따름 {self._reload_paths(res.changed, res.relocated)}곡")
@@ -1301,6 +1321,12 @@ class MainWindow(QMainWindow):
             res.unconfirmed = [orig.get(k, k) for k in res.unconfirmed]
             res.notfound = [orig.get(k, k) for k in res.notfound]
             res.changed = [orig.get(k, k) for k in res.changed]
+            res.restart = None
+            if res.confirmed and restart_mode != "never" and not cancelled():
+                try:
+                    res.restart = music.restart(restart_mode, prog)
+                except music.MusicError as e:
+                    res.restart = f"실패: {e}"
             return res
 
         run_task(self, "Apple Music에 반영", job,
@@ -1693,6 +1719,7 @@ class MainWindow(QMainWindow):
 
 
 RECENT_MAX = 10
+ALBUM_KEYS = {"album", "albumartist", "COMPILATION", "disc"}  # Music 이 앨범을 묶는 데 쓰는 값
 
 QUICK_FILTERS = [
     ("커버 없는 곡", "cover MISSING"),
