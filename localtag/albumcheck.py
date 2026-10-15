@@ -51,9 +51,40 @@ def _number(f: AudioFile, name: str) -> str:
     return f.get(name).split("/", 1)[0].strip()
 
 
+# 커버 구별값 · 크기는 같은 이미지마다 한 번만 계산한다. 같은 커버를 가진 곡들은 메모리에서 bytes 하나를
+# 같이 쓰므로(tagio._picture) id(bytes) 로 기억한다. 점검 창을 닫으면 비운다 (bytes 를 붙잡아 두지 않게).
+_ids: dict = {}    # id(bytes) → (bytes, 구별값)
+_dims: dict = {}   # 구별값 → '800×800'
+
+
+def clear_cache():
+    _ids.clear()
+    _dims.clear()
+
+
 def _cover_id(f: AudioFile) -> str:
     c = f.cover
-    return hashlib.sha1(c.data).hexdigest()[:12] if c is not None else ""
+    if c is None:
+        return ""
+    hit = _ids.get(id(c.data))
+    if hit is not None and hit[0] is c.data:
+        return hit[1]
+    digest = hashlib.sha1(c.data).hexdigest()[:12]
+    _ids[id(c.data)] = (c.data, digest)
+    return digest
+
+
+def _cover_size(digest: str, data: bytes) -> str:
+    """이미지 머리말만 읽어 크기를 안다 (전체를 풀지 않는다)."""
+    if digest not in _dims:
+        from PySide6.QtCore import QBuffer, QByteArray, QIODevice
+        from PySide6.QtGui import QImageReader
+        ba = QByteArray(data)
+        buf = QBuffer(ba)
+        buf.open(QIODevice.ReadOnly)
+        size = QImageReader(buf).size()
+        _dims[digest] = f"{size.width()}×{size.height()}" if size.isValid() else "?"
+    return _dims[digest]
 
 
 def value_of(f: AudioFile, kind: str) -> str:
@@ -175,11 +206,7 @@ def _value_text(kind, v, n, files=None):
         if not v:
             return f"커버 없음 ({n}곡)"
         f = next((x for x in files if _cover_id(x) == v), None)
-        size = ""
-        if f is not None:
-            from PySide6.QtGui import QImage
-            img = QImage.fromData(f.cover.data)
-            size = f"{img.width()}×{img.height()} · " if not img.isNull() else ""
+        size = f"{_cover_size(v, f.cover.data)} · " if f is not None else ""
         return f"커버 {v[:6]} — {size}{n}곡"
     if kind == COMPILATION:
         return f"{'컴필레이션' if v else '컴필레이션 아님'} ({n}곡)"
@@ -219,6 +246,7 @@ class AlbumCheckDialog(QDialog):
         v.addWidget(bb)
         self.reports = check_albums(files)
         self._fill()
+        self.finished.connect(lambda _r: clear_cache())
 
     def _fill(self):
         bold = QFont()

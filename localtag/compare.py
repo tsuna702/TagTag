@@ -19,10 +19,9 @@ COVER_SIDE = 72
 def _cover_text(f: AudioFile) -> str:
     if not f.pictures:
         return ""
-    from PySide6.QtGui import QImage
+    from .albumcheck import _cover_id, _cover_size
     pic = f.cover
-    img = QImage.fromData(pic.data)
-    dims = f"{img.width()}×{img.height()}" if not img.isNull() else "?"
+    dims = _cover_size(_cover_id(f), pic.data)  # 머리말만 읽어 크기를 안다
     more = f" (+{len(f.pictures) - 1})" if len(f.pictures) > 1 else ""
     return f"{dims} · {fmt_size(len(pic.data))}{more}"
 
@@ -81,6 +80,8 @@ class CompareDialog(QDialog):
         bb.rejected.connect(self.reject)
         v.addWidget(bb)
         self._fill()
+        from .albumcheck import clear_cache
+        self.finished.connect(lambda _r: clear_cache())
 
     def _fill(self):
         rows = rows_for(self.files)

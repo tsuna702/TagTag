@@ -31,6 +31,21 @@ from mutagen.ogg import OggFileType
 from mutagen.trueaudio import TrueAudio
 from mutagen.wave import WAVE
 
+import mutagen.mp4 as _mutagen_mp4
+
+_mp4_sort_key = _mutagen_mp4._item_sort_key
+
+
+def _item_sort_key(key, value):
+    # mutagen 은 m4a 를 저장할 때 항목 순서를 정하려고 값마다 repr() 을 만든다. 커버는 수백 KB 라 곡마다 수 ms 가
+    # 든다. 'covr' 는 순서 칸이 혼자뿐이라 값을 비교할 일이 없으므로 값 없이 같은 순서를 돌려준다.
+    if key == "covr":
+        return _mp4_sort_key(key, ())
+    return _mp4_sort_key(key, value)
+
+
+_mutagen_mp4._item_sort_key = _item_sort_key
+
 # 공통 필드 (Mp3tag 기본 태그 패널과 같은 구성)
 FIELDS = [
     "title", "artist", "album", "albumartist", "year",
