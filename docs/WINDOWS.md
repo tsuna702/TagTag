@@ -82,7 +82,7 @@ v0.9.1 — 맥에서 `windows` 를 `main` 으로 합친 첫 릴리스 (맥에서
 릴리스하기 전에 `git fetch` 로 다른 쪽 커밋을 먼저 합친다.
 v1.0.0 — 맥 릴리스에 Windows zip 을 붙임 (2026-10-15). Windows 에서 tests/ 모두 PASS, 받은 exe 로 저장·되돌리기·칸에서 F2 로 고치기·앨범 점검·태그 가져오기 창을 실제로 확인. v0.9.1~0.9.11 에는 Windows zip 이 없다.
 v1.0.1 — Windows 에서 냄 (저장 최적화: 메모리 작업 사본·백업 기록 묶음, 맥에도 해당하는 백업 묶음 포함). 맥에서 tests/ (새 `test_save_stage_backup.py` 포함) PASS 를 먼저 확인한다.
-v1.0.2 — Windows 에서 냄 (태그 가져오기: '한국'을 고르면 일본 스토어에서 찾았어도 곡 ID 로 한국 스토어 이름을 받음, `test_tagsource_country.py`). **맥의 다음 릴리스는 1.0.3** — 맥용 1.0.1·1.0.2 zip 은 없다.
+v1.0.2 — Windows 에서 냄 (태그 가져오기: '한국'을 고르면 일본 스토어에서 찾았어도 곡 ID 로 한국 스토어 이름을 받음, `test_tagsource_country.py`). 맥에서 tests/ 모두 PASS 확인 뒤 같은 코드로 맥용 zip(서명)을 v1.0.2 에 붙임 — 맥용 1.0.1 zip 만 없다. 맥의 다음 릴리스는 1.0.3.
 
 설치 안내 (릴리스 노트): zip 을 풀고 `LocalTag.exe` 실행. 서명하지 않은 앱이라 처음에 "Windows의 PC 보호" 가 뜨면
 **추가 정보 → 실행**.
