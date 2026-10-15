@@ -80,6 +80,7 @@ Windows DLL 이름은 `Qt6Quick.dll` 처럼 `Qt6` 으로 시작해서 DROP 목�
 v0.9.1 — 맥에서 `windows` 를 `main` 으로 합친 첫 릴리스 (맥에서 테스트 모두 PASS). **이 릴리스에 Windows zip 이 아직 없다**
 → Windows PC 에서 `main` 을 받아 `.\release_win.ps1` 로 v0.9.1 에 붙인다. 이제 두 브랜치는 같으니, 앞으로는 어느 쪽에서든
 릴리스하기 전에 `git fetch` 로 다른 쪽 커밋을 먼저 합친다.
+v1.0.0 — 맥 릴리스에 Windows zip 을 붙임 (2026-10-15). Windows 에서 tests/ 모두 PASS, 받은 exe 로 저장·되돌리기·칸에서 F2 로 고치기·앨범 점검·태그 가져오기 창을 실제로 확인. v0.9.1~0.9.11 에는 Windows zip 이 없다.
 
 설치 안내 (릴리스 노트): zip 을 풀고 `LocalTag.exe` 실행. 서명하지 않은 앱이라 처음에 "Windows의 PC 보호" 가 뜨면
 **추가 정보 → 실행**.
