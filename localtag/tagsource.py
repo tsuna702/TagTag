@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from urllib import parse
 
@@ -87,7 +88,8 @@ def search(term: str, country: str = "kr") -> list[Release]:
         return [lookup(found[0], found[1] or country)]
     if not term.strip():
         raise SourceError("검색어를 넣어 주세요.")
-    # 한국 스토어는 검색 결과가 비어 오는 경우가 많아 일본·미국 스토어로 다시 찾는다
+    # 한국 스토어는 공개 API 의 앨범 검색이 비어 온다 → 일본·미국 스토어에서 찾고,
+    # 고른 스토어에도 있는 앨범은 그 스토어 것으로 표시한다 (곡 목록도 그 스토어 이름으로 받는다)
     for c in dict.fromkeys([country, "jp", "us"]):
         r = _json("https://itunes.apple.com/search?" + parse.urlencode(
             {"term": term.strip(), "country": c, "media": "music", "entity": "album", "limit": 50}))
@@ -99,23 +101,64 @@ def search(term: str, country: str = "kr") -> list[Release]:
                 seen.add(rel.id)
                 out.append(rel)
         if out:
+            if c != country:
+                _localize_releases(out, country)
             return out
     return []
 
 
+def _lookup_ids(ids, country) -> list:
+    """ID 여러 개를 한 스토어에서 (한 번에 너무 많지 않게 나눠서)."""
+    res = []
+    for i in range(0, len(ids), 100):
+        res += _json("https://itunes.apple.com/lookup?" + parse.urlencode(
+            {"id": ",".join(ids[i:i + 100]), "country": country})).get("results", [])
+    return res
+
+
+def _localize_releases(rels, country):
+    """다른 스토어에서 찾은 앨범 중 고른 스토어에도 있는 것은 그 스토어 이름·국가로."""
+    try:
+        got = {str(x.get("collectionId")): x for x in _lookup_ids([r.id for r in rels], country)
+               if x.get("wrapperType") == "collection"}
+    except SourceError:
+        return
+    for r in rels:
+        x = got.get(r.id)
+        if x:
+            r.artist = x.get("artistName") or r.artist
+            r.country = country
+
+
 def lookup(album_id: str, country: str = "kr") -> Release:
-    """앨범 하나와 곡 목록. 한국 등 일부 국가는 곡 목록이 비어 오므로 다른 국가로 다시 찾는다."""
-    album, tracks = None, []
+    """앨범 하나와 곡 목록. 한국 등 일부 국가는 곡 목록이 비어 오므로 다른 국가에서 곡 ID 를 받아
+    고른 국가로 그 곡들을 다시 찾는다 (곡 ID 로 찾으면 한국 스토어도 한국어 제목을 준다)."""
+    album, tracks, home = None, [], None
     for c in dict.fromkeys([country, "jp", "us", "gb"]):
         r = _json("https://itunes.apple.com/lookup?" + parse.urlencode(
             {"id": album_id, "entity": "song", "country": c, "limit": 200}))
         res = r.get("results", [])
-        album = next((x for x in res if x.get("wrapperType") == "collection"), album)
+        found = next((x for x in res if x.get("wrapperType") == "collection"), None)
+        if found and c == country:
+            home = found
+        album = album or found
         tracks = [x for x in res if x.get("wrapperType") == "track"]
         if album and tracks:
             break
     if not album:
         raise SourceError("앨범 정보를 찾지 못했습니다.")
+    if home and c != country:  # 고른 스토어에 있는 앨범 → 곡 이름을 그 스토어 것으로
+        try:
+            local = {str(x.get("trackId")): x for x in _lookup_ids([str(t.get("trackId")) for t in tracks], country)
+                     if x.get("wrapperType") == "track"}
+        except SourceError:
+            local = {}
+        if local:
+            tracks = [local.get(str(t.get("trackId")), t) for t in tracks]
+            album, c = dict(home), country
+            names = Counter(x.get("collectionName") for x in local.values() if x.get("collectionName"))
+            if names:
+                album["collectionName"] = names.most_common(1)[0][0]
     rel = _release(album)
     rel.country = c
     for t in sorted(tracks, key=lambda t: (t.get("discNumber", 1), t.get("trackNumber", 0))):
@@ -131,7 +174,6 @@ def lookup(album_id: str, country: str = "kr") -> Release:
 
 def guess_query(files) -> str:
     """고른 곡으로 검색어 만들기: '앨범 아티스트(또는 아티스트) 앨범', 없으면 폴더 이름."""
-    from collections import Counter
     pick = lambda name: Counter(f.get(name) for f in files if f.get(name)).most_common(1)  # noqa: E731
     album = pick("album")
     artist = pick("albumartist") or pick("artist")

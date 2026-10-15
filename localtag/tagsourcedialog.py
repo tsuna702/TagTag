@@ -48,7 +48,7 @@ class TagSourceDialog(QDialog):
         for k, t in ts.COUNTRIES.items():
             self.country.addItem(t, k)
         self.country.setCurrentIndex(max(0, self.country.findData(settings.value("source/country", "kr", str))))
-        self.country.setToolTip("먼저 찾을 스토어 — 결과가 없으면 일본·미국 스토어에서 다시 찾습니다")
+        self.country.setToolTip("이 스토어의 이름으로 가져옵니다 — 검색 결과가 없으면 일본·미국 스토어에서 찾은 뒤 이 스토어 이름으로 바꿉니다")
         go = QPushButton("검색")
         go.setAutoDefault(False)
         go.clicked.connect(self.search)
@@ -165,14 +165,14 @@ class TagSourceDialog(QDialog):
         if not (0 <= row < len(getattr(self, "releases", []))):
             return
         r = self.releases[row]
-        if r.id in self._cache:
-            self._set_release(self._cache[r.id])
+        key = (r.id, self.country.currentData())
+        if key in self._cache:
+            self._set_release(self._cache[key])
             return
-        run_task(self, "곡 목록을 받는 중…", lambda prog, cancelled: ts.lookup(r.id, r.country or self.country.currentData()),
-                 self._set_release, self._failed)
+        run_task(self, "곡 목록을 받는 중…", lambda prog, cancelled: ts.lookup(r.id, key[1]),
+                 lambda rel: (self._cache.__setitem__(key, rel), self._set_release(rel)), self._failed)
 
     def _set_release(self, rel):
-        self._cache[rel.id] = rel
         self.rel = rel
         self.album_label.setText(f"<b>{rel.album}</b> — {rel.artist} · {rel.year} · {rel.genre} · 곡 {len(rel.tracks)}개")
         for i in range(len(self.files)):
