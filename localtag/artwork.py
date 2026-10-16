@@ -24,7 +24,10 @@ from .tagio import Picture
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_IMAGE_PIXELS = 25_000_000
 SIZES = [0, 500, 600, 1000]          # 0 = 원본
-FITS = {"crop": "중앙 자르기", "contain": "비율 유지 · 여백"}
+FITS = {"crop": "중앙 자르기", "contain": "비율 유지 · 검은 여백", "contain_white": "비율 유지 · 흰 여백",
+        "contain_clear": "비율 유지 · 투명 여백 (PNG)"}
+# 여백 색 (None 이면 투명 — JPEG 은 투명을 못 담아 PNG 로 저장)
+FIT_BACKGROUND = {"contain": QColor("black"), "contain_white": QColor("white"), "contain_clear": None}
 COUNTRIES = ["KR", "US", "JP", "GB", "DE", "FR", "ES", "IT", "CA", "AU", "TW", "HK"]
 USER_AGENT = "LocalTag/0.5"
 YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com",
@@ -137,12 +140,15 @@ def process(data: bytes, size: int = 0, fit: str = "crop", trim: bool = False) -
         scaled = scaled.copy(QRect(x, y, size, size))
         out = _on_white(scaled)
     else:
+        bg = FIT_BACKGROUND.get(fit, QColor("black"))
         scaled = img.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        out = QImage(size, size, QImage.Format_RGB32)
-        out.fill(QColor("white"))
+        out = QImage(size, size, QImage.Format_ARGB32 if bg is None else QImage.Format_RGB32)
+        out.fill(Qt.transparent if bg is None else bg)
         p = QPainter(out)
         p.drawImage((size - scaled.width()) // 2, (size - scaled.height()) // 2, scaled)
         p.end()
+        if bg is None:
+            return Picture(_encode(out, "PNG"), "image/png", 3, "")
     return Picture(_encode(out), "image/jpeg", 3, "")
 
 

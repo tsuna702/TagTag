@@ -491,6 +491,7 @@ class RefreshResult:
         self.failed = []        # (처음 받은 경로, 이유)
         self.relocated = {}     # 처음 받은 경로 → 지금 경로 (옮겨진 경우만)
         self.changed = []       # 반영하는 사이 Music 등에서 파일이 다시 바뀐 곡 (처음 받은 경로) — 그 값을 따른다
+        self.cover_fixed = []   # 커버를 Music 에 다시 지정한 곡 (fix_artwork)
         self.retried = 0
 
 
@@ -743,6 +744,73 @@ on run argv
     end try
 end run
 '''
+
+
+# 곡(persistent ID)의 커버를 그림 파일로 다시 지정 — 인자: ID, 그림 경로, ID, 그림 경로 …
+SET_ARTWORK_SCRIPT = '''
+on run argv
+    set n to 0
+    tell application "Music"
+        repeat with k from 1 to (count of argv) by 2
+            try
+                set t to (first track of library playlist 1 whose persistent ID is (item k of argv))
+                set pic to (read (POSIX file (item (k + 1) of argv)) as picture)
+                set data of artwork 1 of t to pic
+                set n to n + 1
+            on error errText number errNum
+                if errNum is -1743 then error errText number errNum
+            end try
+        end repeat
+    end tell
+    return n as text
+end run
+'''
+
+
+def library_artworks(pids) -> dict:
+    """곡 ID → Music 이 화면에 쓰는 커버 데이터 (보관함 캐시, iTunesLibrary 로 읽기만). 없으면 b''."""
+    want = {p.upper() for p in pids}
+    o = _bridge()
+    ctypes.cdll.LoadLibrary("/System/Library/Frameworks/iTunesLibrary.framework/iTunesLibrary")
+    o.lib.objc_autoreleasePoolPush.restype = ctypes.c_void_p
+    o.lib.objc_autoreleasePoolPop.argtypes = [ctypes.c_void_p]
+    pool = o.lib.objc_autoreleasePoolPush()
+    try:
+        err = ctypes.c_void_p()
+        lib = o.send(o.cls("ITLibrary"), "libraryWithAPIVersion:error:", o.nsstr("1.0"), ctypes.byref(err),
+                     argtypes=[ctypes.c_void_p, ctypes.c_void_p])
+        out = {}
+        for it in o.array(o.send(lib, "allMediaItems")) if lib else []:
+            pid = f"{o.send(o.send(it, 'persistentID'), 'unsignedLongLongValue', restype=ctypes.c_ulonglong):016X}"
+            if pid in want:
+                art = o.send(it, "artwork")
+                out[pid] = o.data(o.send(art, "imageData")) if art else b""
+        return out
+    finally:
+        o.lib.objc_autoreleasePoolPop(pool)
+
+
+def fix_artwork(items, cached=None) -> list:
+    """커버를 바꾼 곡: Music 이 화면에 쓰는 커버가 파일 속 커버와 다르면 Music 에 다시 지정한다.
+    Music 은 곡을 처음 넣을 때 같은 앨범의 다른 곡 그림을 붙여 두고, 파일 커버를 바꿔 새로 읽혀도
+    그 연결을 놓지 않는 일이 있다 (곡 정보에 커버가 비어 보임). items: [(ID, 파일 경로, 커버 bytes)].
+    다시 지정한 곡의 경로 목록을 돌려준다."""
+    items = [(pid, path, data) for pid, path, data in items if pid and data]
+    if not items:
+        return []
+    have = cached if cached is not None else library_artworks([pid for pid, _p, _d in items])
+    todo = [(pid, path, data) for pid, path, data in items if have.get(pid.upper()) != data]
+    if not todo:
+        return []
+    with tempfile.TemporaryDirectory(prefix="localtag-art-") as tmp:
+        args = []
+        for i, (pid, _path, data) in enumerate(todo):
+            img = os.path.join(tmp, f"{i}.img")
+            with open(img, "wb") as fh:
+                fh.write(data)
+            args += [pid, img]
+        _osascript(SET_ARTWORK_SCRIPT, *args, timeout=600)
+    return [path for _pid, path, _d in todo]
 
 
 def add_files(paths) -> int:

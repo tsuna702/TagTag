@@ -926,6 +926,7 @@ class MainWindow(QMainWindow):
                     cur_path = p.new_path
                 entry.items.append(UndoItem(old_path, cur_path, held[0] if held else None))
                 entry.items[-1].pid = pids.get(os.path.realpath(old_path))
+                entry.items[-1].cover = p.pictures is not None  # 커버를 바꿨으면 Music 의 커버도 확인한다
                 held.clear()
                 if bentry is not None:
                     job.after(bentry, cur_path)
@@ -963,7 +964,9 @@ class MainWindow(QMainWindow):
             if music_on:
                 changed = [i.new_path for i in entry.items]
                 known = {i.new_path: i.pid for i in entry.items if getattr(i, "pid", None)}
-                self._music_refresh_paths(changed, modal=False, album_change=entry.album_change, known_pids=known)
+                covers = {i.new_path: i.pid for i in entry.items if getattr(i, "cover", False) and getattr(i, "pid", None)}
+                self._music_refresh_paths(changed, modal=False, album_change=entry.album_change, known_pids=known,
+                                          cover_pids=covers)
         if refresh_panel:
             self.panel.set_files(self.selected_files())
         self._update_status()
@@ -1439,7 +1442,7 @@ class MainWindow(QMainWindow):
             if prog:
                 prog.close()
 
-    def _music_refresh_paths(self, paths, modal=True, album_change=False, known_pids=None):
+    def _music_refresh_paths(self, paths, modal=True, album_change=False, known_pids=None, cover_pids=None):
         if getattr(self, "_music_busy", False):
             self.statusBar().showMessage("Music 작업이 이미 진행 중입니다.", 4000)
             return
@@ -1470,6 +1473,11 @@ class MainWindow(QMainWindow):
                 parts.append("재생 중이라 Music 을 다시 켜지 않음 — 앨범이 갈라져 보이면 Music 을 다시 켜 주세요")
             elif res.restart and res.restart.startswith("실패"):
                 parts.append(f"Music 다시 켜기 {res.restart}")
+            if res.cover_fixed:
+                # Music 이 커버를 파일에 다시 쓰므로 목록·실행 취소 기록도 지금 파일로 맞춘다
+                self._reload_paths(res.cover_fixed, {})
+                self._refresh_undo_after(res.cover_fixed)
+                parts.append(f"커버를 Music 에 다시 지정 {len(res.cover_fixed)}곡")
             if res.changed:
                 # 반영하는 사이 Music 에서 직접 고친 곡 — 그 값을 따르고 목록을 다시 읽는다
                 parts.append(f"Music에서 고친 값을 따름 {self._reload_paths(res.changed, res.relocated)}곡")
@@ -1543,6 +1551,22 @@ class MainWindow(QMainWindow):
             res.unconfirmed = [orig.get(k, k) for k in res.unconfirmed]
             res.notfound = [orig.get(k, k) for k in res.notfound]
             res.changed = [orig.get(k, k) for k in res.changed]
+            res.cover_fixed = []
+            if cover_pids and not cancelled():
+                # 커버를 바꾼 곡: Music 이 화면에 쓰는 그림이 파일과 다르면 다시 지정 (ID 로만 찾는다)
+                items = []
+                for p, pid in cover_pids.items():
+                    now = final.get(os.path.realpath(p), p)
+                    try:
+                        pic = AudioFile.load(now, opts).cover
+                    except Exception:
+                        continue
+                    if pic is not None:
+                        items.append((pid, now, pic.data))
+                try:
+                    res.cover_fixed = music.fix_artwork(items)
+                except music.MusicError as e:
+                    res.failed.append(("커버 다시 지정", str(e)))
             res.restart = None
             if res.confirmed and restart_mode != "never" and not cancelled():
                 try:
@@ -1553,6 +1577,17 @@ class MainWindow(QMainWindow):
 
         run_task(self, "Apple Music에 반영", job,
                  done, fail, modal=modal, status=lambda m: self.statusBar().showMessage(m, 3000))
+
+    def _refresh_undo_after(self, paths):
+        """다른 프로그램(Music)이 다시 쓴 파일 — 실행 취소 전 확인이 '다른 곳에서 바뀜'으로 보지 않게 저장 직후 상태를 고친다."""
+        want = {os.path.realpath(p) for p in paths}
+        for entry in self.undo_stack[-1:]:
+            for item in entry.items:
+                if os.path.realpath(item.new_path) in want and item.after is not None:
+                    try:
+                        item.after = tag_state(AudioFile.load(item.new_path, self.opts))
+                    except Exception:
+                        pass
 
     def _reload_paths(self, paths, relocated):
         """목록의 이 파일들을 지금 파일 내용으로 다시 읽는다 (옮겨졌으면 새 위치에서)."""
