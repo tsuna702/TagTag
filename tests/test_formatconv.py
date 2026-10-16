@@ -49,6 +49,14 @@ def run(self):
     else:
         check(self.add_music.isHidden() and not self.add_music.isChecked(), "Windows: Music 에 추가 칸 없음")
     self.orig_box.setCurrentIndex(self.orig_box.findData("keep"))
+    # 변환 전에 한 번 더 묻기 — 취소하면 창도 닫지 않음
+    asked = []
+    self._confirm = lambda text: (asked.append(text), False)[1]
+    self._accept()
+    check(asked and asked[0].startswith("1곡을 ALAC") and "그대로 둠" in asked[0] and "되돌릴 수 없습니다" in asked[0]
+          and (("Music 보관함에 추가" in asked[0]) == IS_MAC), f"변환 전 확인 {asked}")
+    check(self.result() == 0, "취소 → 변환 안 함")
+    self._confirm = lambda text: True
     self._accept()
     return 1
 
@@ -106,6 +114,7 @@ msgs.clear()
 def run_off(self):
     self.target_box.setCurrentIndex(self.target_box.findData("aac256"))
     self.add_music.setChecked(False)
+    self._confirm = lambda text: True
     self._accept()
     return 1
 

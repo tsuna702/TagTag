@@ -16,10 +16,10 @@ from dataclasses import dataclass
 from PySide6.QtCore import QFile
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHeaderView, QLabel, QTableWidget, QTableWidgetItem, QVBoxLayout,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHeaderView, QLabel, QMessageBox, QTableWidget, QTableWidgetItem, QVBoxLayout,
 )
 
-from .osutil import IS_MAC
+from .osutil import IS_MAC, keys
 from .tagio import AudioFile, Options
 
 AFCONVERT = "/usr/bin/afconvert"
@@ -245,8 +245,27 @@ class FormatConvertDialog(QDialog):
         self.ok_btn.setText(f"{n}곡 변환")
         self.ok_btn.setEnabled(n > 0)
 
+    def _confirm(self, text) -> bool:
+        """변환 전에 한 번 더 묻는다 — 새 파일을 만드는 작업이라 실행 취소로 되돌릴 수 없다 (테스트에서 바꿔 끼운다)."""
+        box = QMessageBox(QMessageBox.Question, "형식 변환", text, parent=self)
+        ok = box.addButton("변환", QMessageBox.AcceptRole)
+        box.addButton("취소", QMessageBox.RejectRole)
+        box.setDefaultButton(ok)
+        box.exec()
+        return box.clickedButton() is ok
+
     def _accept(self):
-        self.originals = self.orig_box.currentData()
+        n = sum(1 for j in self.jobs if not j.skip)
+        orig = self.orig_box.currentData()
+        lines = [f"{n}곡을 {TARGETS[self.target][0]} 로 변환할까요?", "",
+                 "원본 파일: " + ("휴지통으로 옮김" if orig == "trash" else "그대로 둠")]
+        if IS_MAC and self.add_music.isChecked():
+            lines.append("새 파일을 Music 보관함에 추가")
+        lines += ["", keys("새 파일을 만드는 작업이라 실행 취소(⌘Z)로는 되돌릴 수 없습니다.")
+                  + (" 휴지통으로 옮긴 원본은 휴지통에서 꺼낼 수 있습니다." if orig == "trash" else "")]
+        if not self._confirm("\n".join(lines)):
+            return
+        self.originals = orig
         self.settings.setValue("convert/target", self.target)
         self.settings.setValue("convert/originals", self.originals)
         if IS_MAC:
