@@ -6,7 +6,7 @@ import time
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QSortFilterProxyModel, Qt
 
-from .tagio import FIELD_LABELS, AudioFile
+from .tagio import FIELD_LABELS, SORT_FIELDS, AudioFile
 
 SORT_ROLE = Qt.UserRole + 1
 
@@ -76,6 +76,7 @@ COLUMNS = [
     ("realcodec", "코덱", lambda f: f.codec, lambda f: f.codec, False),
     ("bits", "비트 깊이", lambda f: f"{f.bits} bit" if f.bits else "", lambda f: f.bits, False),
     ("quality", "음질", quality_label, lambda f: f.quality_key(), False),
+    *[(k, FIELD_LABELS[k], *_tag(k), False) for k in SORT_FIELDS],
 ]
 COLUMN_KEYS = [c[0] for c in COLUMNS]
 COLUMN_WIDTHS = {
@@ -83,6 +84,7 @@ COLUMN_WIDTHS = {
     "albumartist": 150, "year": 55, "track": 50, "disc": 50, "genre": 100,
     "composer": 130, "comment": 160, "cover": 45, "length": 60, "bitrate": 80,
     "samplerate": 85, "codec": 55, "realcodec": 60, "bits": 65, "quality": 60, "tagtype": 120, "size": 75, "mtime": 120, "path": 300,
+    "TITLESORT": 160, "ARTISTSORT": 140, "ALBUMSORT": 160, "ALBUMARTISTSORT": 140,
 }
 RIGHT_ALIGNED = {"length", "bitrate", "samplerate", "size", "cover", "bits"}
 
@@ -90,7 +92,7 @@ RIGHT_ALIGNED = {"length", "bitrate", "samplerate", "size", "cover", "bits"}
 DISPLAY_ROLES = (Qt.DisplayRole, Qt.ToolTipRole)
 # 목록 칸에서 바로 고칠 수 있는 열 (파일명은 확장자를 뺀 이름만 고친다)
 EDITABLE = {"filename", "title", "artist", "album", "albumartist", "year", "track", "disc",
-            "genre", "composer", "comment"}
+            "genre", "composer", "comment", *SORT_FIELDS}
 
 
 class FileModel(QAbstractTableModel):

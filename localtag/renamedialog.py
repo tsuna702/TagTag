@@ -21,10 +21,10 @@ from .rename import (
     FORMS, INT_RANGES, REGEX_HELP, REGEX_PRESETS, RULE_TYPES, apply_rules, compile_rules, describe, new_rule,
 )
 from .script import ScriptError
-from .tagio import FIELD_LABELS, field_key
+from .tagio import FIELD_LABELS, SORT_FIELDS, field_key
 
 FILENAME = "_filename"
-TARGETS = ["title", FILENAME, "album", "artist", "albumartist", "comment"]
+TARGETS = ["title", FILENAME, "album", "artist", "albumartist", "comment", *SORT_FIELDS]
 
 
 def _target_label(k):

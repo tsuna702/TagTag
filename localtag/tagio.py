@@ -64,6 +64,10 @@ FIELD_LABELS = {
     "composer": "작곡가",
     "comment": "코멘트",
 }
+# 정렬용 이름 — Music 이 이 값으로 정렬한다 (예: 米津玄師 → Yonezu Kenshi)
+SORT_FIELDS = ["TITLESORT", "ARTISTSORT", "ALBUMSORT", "ALBUMARTISTSORT"]
+FIELD_LABELS.update({"TITLESORT": "정렬용 제목", "ARTISTSORT": "정렬용 아티스트", "ALBUMSORT": "정렬용 앨범",
+                     "ALBUMARTISTSORT": "정렬용 앨범 아티스트", "COMPOSERSORT": "정렬용 작곡가"})
 
 # Mp3tag에서 쓰는 다른 이름도 받아 준다
 FIELD_ALIASES = {
@@ -222,7 +226,17 @@ ID3_EXT = {
 }
 ID3_EXT_REV = {v: k for k, v in ID3_EXT.items()}
 # ID3v2.3에는 없는 프레임 (v2.3으로 저장하면 mutagen이 지운다)
-ID3_V24_ONLY = {"TMOO", "TDRL", "TSOA", "TSOP", "TSOT", "TSST", "TPRO", "TDEN", "TDTG", "TSO2", "TSOC"}
+ID3_V24_ONLY = {"TMOO", "TDRL", "TSST", "TPRO", "TDEN", "TDTG"}
+# 정렬용 프레임: 표준으로는 v2.4 것이지만 iTunes·Music 이 v2.3 에도 쓰고 읽는다 → v2.3 에서도 그대로 둔다
+ID3_ITUNES_SORT = ("TSOA", "TSOP", "TSOT", "TSO2", "TSOC")
+
+
+def _to_v23(tags):
+    """v2.3 으로 바꾸되 정렬용 프레임은 남긴다 (mutagen 은 지운다)."""
+    keep = [tags.pop(k) for k in ID3_ITUNES_SORT if k in tags]
+    tags.update_to_v23()
+    for fr in keep:
+        tags.add(fr)
 # 화면에 따로 보이지 않는 텍스트 프레임 (다른 필드에 포함되거나 자동 관리됨)
 ID3_HIDDEN = {"TLEN", "TDTG", "TDEN", "TFLT", "TIPL", "TMCL", "TPRO", "TRSO", "TDAT", "TIME", "TYER", "TRDA", "TSIZ", "TORY"}
 
@@ -889,7 +903,7 @@ class AudioFile:
                 _id3_write(tags, changes, pictures, opts)
                 v2 = 3 if opts.id3_v23 else 4
                 if v2 == 3:
-                    tags.update_to_v23()
+                    _to_v23(tags)
                 if isinstance(mf, (MP3, TrueAudio)):
                     tags.save(rewind(path), v1=2 if opts.write_id3v1 else 1, v2_version=v2)
                 else:
@@ -1104,7 +1118,7 @@ def _restore_into(path: str, snap: Snapshot):
         else:
             v2 = tags.version[1] if tags.version[0] == 2 and tags.version[1] in (3, 4) else 4
             if v2 == 3:
-                tags.update_to_v23()
+                _to_v23(tags)
             if is_mp3:
                 tags.save(rewind(path), v1=2 if snap.had_v1 else 0, v2_version=v2)
             else:
