@@ -48,6 +48,13 @@ w.undo()
 app.processEvents()
 check(all(by_path(p).get("title") == t for p, (t, _m) in orig.items()), "한 번 더 실행 취소 → 원래 제목")
 check(all(abs(os.stat(p).st_mtime - m) < 0.01 for p, (_t, m) in orig.items()), "원래 수정 시각")
+# 단축키: 맥은 ⇧⌘Z 가 먼저(메뉴에 보임), ⌘Y 도 됨 / Windows 는 Ctrl+Y · Ctrl+Shift+Z
+from PySide6.QtGui import QKeySequence  # noqa: E402
+from localtag.osutil import IS_MAC  # noqa: E402
+keys_ = [k.toString() for k in w.redo_act.shortcuts()]
+want = ["Ctrl+Shift+Z", "Ctrl+Y"] if IS_MAC else ["Ctrl+Y"]
+check(keys_[:len(want)] == want or (not IS_MAC and "Ctrl+Y" in keys_ and "Ctrl+Shift+Z" in keys_),
+      f"다시 실행 단축키 {keys_}")
 
 # 2) 새 작업을 하면 다시 실행 기록이 빈다
 check(bool(w.redo_stack), "다시 실행 기록 있음")
