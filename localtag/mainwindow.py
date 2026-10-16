@@ -878,7 +878,7 @@ class MainWindow(QMainWindow):
         # 앨범을 이루는 값이 바뀌면 Music 앨범 화면이 갈라져 보일 수 있다 → 반영 뒤 Music 다시 켜기
         entry.album_change = any(p.remove_tags or set(p.changes) & ALBUM_KEYS for p in plans)
         # Music 에 반영할 거라면 파일을 바꾸기 전에 곡 ID 를 찾아 둔다 (바꾼 뒤 경로로 찾으면 Music 이 몰아서 다시 읽는다)
-        music_on = IS_MAC and self.settings.value("music_auto", False, bool)
+        music_on = IS_MAC and (self.settings.value("music_auto", False, bool) or getattr(self, "_music_once", False))
         pids = self._music_prelookup([p.file for p in plans if p.touches_tags or p.new_path]) if music_on else {}
         job = None
         if self.backup_enabled:
@@ -1197,8 +1197,18 @@ class MainWindow(QMainWindow):
 
         def done(report):
             dlg = lc.LibraryCheckDialog(self, report)
-            if dlg.exec() and dlg.picked:
-                self.load_paths(dlg.picked, replace=True)
+            if not (dlg.exec() and dlg.picked):
+                return
+            self.load_paths(dlg.picked, replace=True)
+            if dlg.fix_albums and self.model.files:
+                # 갈라진 앨범을 맞추는 것이 목적이라 Music 자동 반영이 꺼져 있어도 이번만 반영한다
+                # (저장 전에 곡 ID 를 찾아 두는 apply_plans 의 흐름을 그대로 탄다)
+                self.select_files(list(self.model.files))
+                self._music_once = True
+                try:
+                    self.check_albums()
+                finally:
+                    self._music_once = False
 
         run_task(self, "Music 보관함을 읽는 중…", lambda prog, cancelled: lc.analyze(lc.read_library()), done,
                  lambda msg: QMessageBox.warning(self, "Music 보관함 점검", msg))

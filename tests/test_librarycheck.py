@@ -4,6 +4,7 @@
 """
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from harness import QApplication, check, finish, samples, window  # noqa: E402
@@ -61,8 +62,55 @@ for _ in range(200):
     app.processEvents()
     if w.model.files:
         break
-    import time
     time.sleep(0.02)
 check(sorted(f.filename for f in w.model.files) == ["01 곡 1.mp3", "02 곡 2.flac", "03 곡 3.m4a", "새 파일.ogg"],
       f"갈라진 앨범의 곡을 목록으로 {[f.filename for f in w.model.files]}")
+
+# '열어서 앨범 점검으로 맞추기' → 열고 앨범 점검을 띄우고, 자동 반영이 꺼져 있어도 이번만 Music 에 반영
+from localtag import albumcheck  # noqa: E402
+from localtag.plan import Plan  # noqa: E402
+
+w.apply_plans([Plan(next(f for f in w.model.files if f.filename == "03 곡 3.m4a"), changes={"albumartist": ["IU"]})],
+              "갈라지게")
+app.processEvents()
+looked, refreshed = [], []
+w._music_prelookup = lambda files: (looked.extend(f.path for f in files), {os.path.realpath(f.path): "PID" for f in files})[1]
+w._music_refresh_paths = lambda paths, **kw: refreshed.append((list(paths), kw.get("known_pids")))
+check(not w.settings.value("music_auto", False, bool), "자동 반영은 꺼져 있음")
+
+
+def run_fix(self):
+    self.tabs.setCurrentIndex(1)
+    check(self.fix_btn.isVisible() or not self.isVisible(), "갈라진 앨범 탭에 맞추기 단추")
+    self.fix_picked()
+    return 1
+
+
+seen = []
+
+
+def run_check(self):
+    kinds = {i.kind for r in self.reports for i in r.issues} if hasattr(self, "reports") else set()
+    seen.append(kinds)
+    for it, issue, cb in self.rows:
+        it.setCheckState(0, Qt.Checked if issue.kind == "albumartist" else Qt.Unchecked)
+    self._fix()
+    return 1
+
+
+from PySide6.QtCore import Qt  # noqa: E402
+
+lc.LibraryCheckDialog.exec = run_fix
+albumcheck.AlbumCheckDialog.exec = run_check
+w.library_check()
+for _ in range(200):
+    app.processEvents()
+    if refreshed:
+        break
+    time.sleep(0.02)
+aa = {f.filename: f.get("albumartist") for f in w.model.files}
+check(len(set(aa.values())) == 1, f"앨범 아티스트를 하나로 {aa}")
+check(looked and refreshed, "저장 전에 곡 ID 를 찾고, 저장 뒤 Music 에 반영")
+check(refreshed and all(v == "PID" for v in (refreshed[0][1] or {}).values()), "반영은 찾아 둔 ID 로 (경로로 찾지 않음)")
+check(not getattr(w, "_music_once", False), "이번만 — 끝나면 다시 끔")
 finish()

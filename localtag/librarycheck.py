@@ -167,12 +167,13 @@ TABS = [("nocover", "커버 없는 곡", "Music 에서 커버가 보이지 않�
 
 
 class LibraryCheckDialog(QDialog):
-    """결과: self.picked (열 파일 경로)"""
+    """결과: self.picked (열 파일 경로), self.fix_albums (열고 앨범 점검까지)"""
 
     def __init__(self, parent, report: Report):
         super().__init__(parent)
         self.report = report
         self.picked = []
+        self.fix_albums = False
         self.setWindowTitle("Music 보관함 점검")
         self.resize(900, 620)
         v = QVBoxLayout(self)
@@ -205,6 +206,11 @@ class LibraryCheckDialog(QDialog):
         self.open_btn.setToolTip("앨범을 고르면 그 앨범의 곡 전부. 아무것도 안 고르면 이 탭의 곡 전부")
         self.open_btn.clicked.connect(self.open_picked)
         row.addWidget(self.open_btn)
+        self.fix_btn = QPushButton("열어서 앨범 점검으로 맞추기")
+        self.fix_btn.setToolTip("고른 앨범(안 고르면 전부)을 열고 바로 앨범 점검(⇧⌘L)을 띄웁니다. "
+                                "맞춘 뒤 Music 에도 반영해 앨범을 하나로 합칩니다")
+        self.fix_btn.clicked.connect(self.fix_picked)
+        row.addWidget(self.fix_btn)
         row.addStretch(1)
         v.addLayout(row)
         bb = QDialogButtonBox(QDialogButtonBox.Close)
@@ -236,6 +242,14 @@ class LibraryCheckDialog(QDialog):
 
     def _tab_changed(self, i):
         self.open_btn.setEnabled(TABS[i][0] != "missing" and self.trees[TABS[i][0]].topLevelItemCount() > 0)
+        self.fix_btn.setVisible(TABS[i][0] == "split")
+        self.fix_btn.setEnabled(self.trees["split"].topLevelItemCount() > 0)
+
+    def fix_picked(self):
+        self.picked = self.paths_of(self.trees["split"])
+        if self.picked:
+            self.fix_albums = True
+            self.accept()
 
     def paths_of(self, tree) -> list[str]:
         items = tree.selectedItems() or [tree.topLevelItem(i) for i in range(tree.topLevelItemCount())]
