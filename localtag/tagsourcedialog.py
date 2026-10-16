@@ -9,7 +9,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QBrush, QColor, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView,
-    QLabel, QLineEdit, QPushButton, QSplitter, QTableWidget, QTableWidgetItem,
+    QLabel, QLineEdit, QMessageBox, QPushButton, QSplitter, QTableWidget, QTableWidgetItem,
     QVBoxLayout, QWidget,
 )
 
@@ -26,12 +26,22 @@ GRAY = QBrush(QColor(140, 140, 140))
 PREVIEW = 110  # 커버 미리보기 크기 (px)
 
 
+def _current_key(f):
+    """지금 곡의 정렬 순서: 디스크 → 트랙 번호 → 제목."""
+    def num(name):
+        v = f.get(name).split("/")[0].strip()
+        return int(v) if v.isdigit() else 10 ** 6
+    return num("disc") if f.get("disc") else 0, num("track"), (f.get("title") or f.stem).casefold()
+
+
 class TagSourceDialog(QDialog):
     """결과: self.plans"""
 
     def __init__(self, parent, files, settings):
         super().__init__(parent)
-        self.files, self.settings = files, settings
+        # 처음에는 지금 디스크·트랙 번호 순으로 (오름차순). 머리글을 눌러 다른 칸으로 정렬한다
+        self.files, self.settings = sorted(files, key=_current_key), settings
+        self.sort_col, self.sort_desc = 0, False
         self.rel = None
         self.pairs = [None] * len(files)
         self.scores = [0.0] * len(files)
@@ -106,6 +116,10 @@ class TagSourceDialog(QDialog):
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         hh = self.table.horizontalHeader()
+        hh.setSortIndicatorShown(True)
+        hh.setSortIndicator(0, Qt.AscendingOrder)
+        hh.setSectionsClickable(True)
+        hh.sectionClicked.connect(self._header_clicked)
         hh.setSectionResizeMode(QHeaderView.Interactive)
         for c, w in enumerate((230, 260, 170, 120, 60)):
             self.table.setColumnWidth(c, w)
@@ -172,11 +186,14 @@ class TagSourceDialog(QDialog):
         bb.rejected.connect(self.reject)
         v.addWidget(bb)
 
-        for i, f in enumerate(files):
+        self._fill_current()
+        self._refresh_rows()
+
+    def _fill_current(self):
+        for i, f in enumerate(self.files):
             it = QTableWidgetItem(f"{f.get('title') or f.stem}  ({fmt_length(f.length)})")
             it.setToolTip(f.path)
             self.table.setItem(i, 0, it)
-        self._refresh_rows()
 
     def done(self, r):
         self.settings.setValue("source/results_header", self.results.horizontalHeader().saveState())
@@ -239,14 +256,56 @@ class TagSourceDialog(QDialog):
                    f" · <span style='color:gray'>커버: {rel.artwork_from}</span>" if rel.artwork_from else "")
         self.album_label.setText(f"<b>{rel.album}</b> — {rel.artist} · {bits}{nocover}")
         self._show_preview(rel)
+        self._build_combos()
+        self.pair_auto()
+
+    def _build_combos(self):
+        rel = self.rel
         for i in range(len(self.files)):
             cb = QComboBox()
             cb.addItem("— 짝 없음 —", None)
             for j, t in enumerate(rel.tracks):
                 cb.addItem(t.label(), j)
+            j = self.pairs[i] if i < len(self.pairs) else None
+            cb.setCurrentIndex(0 if j is None else j + 1)
             cb.currentIndexChanged.connect(lambda _x, i=i, cb=cb: self._set_pair(i, cb.currentData(), manual=True))
             self.table.setCellWidget(i, 1, cb)
-        self.pair_auto()
+
+    # ------------------------------------------------------------ 정렬
+    def _header_clicked(self, col):
+        desc = (not self.sort_desc) if col == self.sort_col else False
+        self.sort_rows(col, desc)
+
+    def sort_rows(self, col: int, desc: bool = False):
+        """곡 표를 col 칸으로 정렬 (짝·점수도 함께 옮긴다). 값이 없는 줄은 늘 맨 아래."""
+        def track(i):
+            j = self.pairs[i] if self.rel else None
+            return self.rel.tracks[j] if j is not None else None
+
+        def key(i):
+            t = track(i)
+            if col == 0:
+                return _current_key(self.files[i])
+            if col == 5:
+                return self.scores[i] if t else None
+            if t is None:
+                return None
+            return {1: (t.disc, t.num), 4: (t.disc, t.num), 2: t.title.casefold(), 3: t.artist.casefold()}[col]
+
+        idx = list(range(len(self.files)))
+        have = sorted((i for i in idx if key(i) is not None), key=key, reverse=desc)
+        order = have + [i for i in idx if key(i) is None]
+        self.sort_col, self.sort_desc = col, desc
+        self.table.horizontalHeader().setSortIndicator(col, Qt.DescendingOrder if desc else Qt.AscendingOrder)
+        if order == idx:
+            return
+        self.files = [self.files[i] for i in order]
+        self.pairs = [self.pairs[i] for i in order]
+        self.scores = [self.scores[i] for i in order]
+        self._fill_current()
+        if self.rel:
+            self._build_combos()
+        self._refresh_rows()
 
     def _show_preview(self, rel):
         """커버 미리보기 — 작은 그림을 뒤에서 받는다 (실패해도 조용히)."""
@@ -359,6 +418,15 @@ class TagSourceDialog(QDialog):
         self.ok_btn.setEnabled(bool(self.rel) and n_pair > 0)
 
     # ------------------------------------------------------------ 적용
+    def _confirm(self, text) -> bool:
+        """적용하기 전에 한 번 더 묻는다 (테스트에서 바꿔 끼운다)."""
+        box = QMessageBox(QMessageBox.Question, "태그 가져오기", text, parent=self)
+        ok = box.addButton("적용", QMessageBox.AcceptRole)
+        box.addButton("취소", QMessageBox.RejectRole)
+        box.setDefaultButton(ok)
+        box.exec()
+        return box.clickedButton() is ok
+
     def _remember(self):
         self.settings.setValue("source/fields", sorted(self.fields()) + (["cover"] if self.cover.isChecked() else []))
         self.settings.setValue("source/totals", self.totals.isChecked())
@@ -367,9 +435,17 @@ class TagSourceDialog(QDialog):
     def apply(self):
         if not self.rel:
             return
-        self._remember()
         rel, fields, totals = self.rel, self.fields(), self.totals.isChecked()
         want_cover = self.cover.isChecked() and bool(rel.artwork)
+        paired = [(f, rel.tracks[j]) for f, j in zip(self.files, self.pairs) if j is not None]
+        n = sum(1 for f, t in paired if want_cover or ts.changes_for(f, rel, t, fields, totals))
+        names = [t for k, t in FIELDS if k in fields] + (["커버"] if want_cover else [])
+        if not n:
+            self._failed("바뀌는 곡이 없습니다 — 넣을 정보를 확인해 주세요.")
+            return
+        if not self._confirm(f"{n}곡에 적용할까요?\n\n앨범: {rel.album} — {rel.artist}\n넣을 정보: {', '.join(names)}"):
+            return
+        self._remember()
         size = self.cover_size.currentData()
 
         def job(prog, cancelled):

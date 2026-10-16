@@ -151,8 +151,29 @@ def run_source(self):
     check(self.pairs == [None] * 4 and not self.ok_btn.isEnabled(), "짝 모두 풀기")
     self.pair_ordered()
     check(self.pairs == [0, 1, 2, 3], "순서대로 짝짓기")
+    # 정렬: 처음엔 트랙 번호 오름차순, 머리글을 누르면 짝도 함께 따라감, 같은 칸을 다시 누르면 내림차순
+    check([f.filename for f in self.files][:3] == ["01 곡 1.mp3", "02 곡 2.flac", "03 곡 3.m4a"], "처음엔 오름차순")
+    before = {f.filename: j for f, j in zip(self.files, self.pairs)}
+    self._header_clicked(4)
+    self._header_clicked(4)
+    check(self.sort_desc and [self.pairs[i] for i in range(4)] == [3, 2, 1, 0], f"새 번호 내림차순 {self.pairs}")
+    check({f.filename: j for f, j in zip(self.files, self.pairs)} == before, "정렬해도 짝은 그 곡에 그대로")
+    check([self.table.cellWidget(i, 1).currentData() for i in range(4)] == self.pairs, "짝 고르는 칸도 같이 옮김")
+    self.table.cellWidget(0, 1).setCurrentIndex(0)  # 맨 위(이제 새 파일.ogg) 짝 풀기 → 그 곡만
+    check(self.files[0].filename == "새 파일.ogg" and self.pairs[0] is None, "정렬 뒤 고친 짝은 그 줄의 곡")
+    self.pair_ordered()
+    self.sort_rows(0)
+    self.pair_ordered()
+    # 적용 전에 한 번 더 묻기 — 취소하면 아무것도 안 함
     self.cover.setChecked(False)
     self.checks["genre"].setChecked(False)
+    asked = []
+    self._confirm = lambda text: (asked.append(text), False)[1]
+    self.apply()
+    check(asked and asked[0].startswith("4곡에 적용할까요?") and "커버" not in asked[0] and "장르" not in asked[0],
+          f"적용 전 확인 {asked}")
+    check(not self.plans and self.result() == 0, "취소 → 적용 안 함")
+    self._confirm = lambda text: True
     self.apply()
     return 1
 
