@@ -1,11 +1,13 @@
-"""형식 변환 (macOS 전용): FLAC·WAV·AIFF 등 → ALAC(무손실) 또는 AAC, 맥에 들어 있는 afconvert 로.
+"""형식 변환: FLAC·WAV·AIFF 등 → ALAC(무손실) 또는 AAC. macOS 는 들어 있는 afconvert, Windows 는 설치한 ffmpeg 로.
 
 Music 이 못 읽는 FLAC 을 Music 에 넣을 수 있게 한다. 태그와 커버는 LocalTag 가 옮겨 쓴다.
 원본은 그대로 두거나 휴지통으로 옮긴다 (지우지 않는다). 새 파일을 만드는 작업이라 실행 취소에는 들어가지 않는다.
 """
 from __future__ import annotations
 
+import glob
 import os
+import shutil
 import subprocess
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -17,22 +19,44 @@ from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHeaderView, QLabel, QTableWidget, QTableWidgetItem, QVBoxLayout,
 )
 
+from .osutil import IS_MAC
 from .tagio import AudioFile, Options
 
 AFCONVERT = "/usr/bin/afconvert"
+FFMPEG_INSTALL = "winget install Gyan.FFmpeg"
 TARGETS = {
     "alac": ("ALAC (무손실, .m4a)", "ALAC"),
     "aac256": ("AAC 256kbps (.m4a, Apple Music 과 같은 음질)", "AAC"),
     "aac320": ("AAC 320kbps (.m4a)", "AAC"),
 }
 ORIGINALS = {"keep": "그대로 두기", "trash": "휴지통으로 옮기기"}
-# afconvert 가 읽는 형식 (실제 코덱 이름 기준)
+# afconvert 가 읽는 형식 (실제 코덱 이름 기준). ffmpeg 는 더 많이 읽는다
 READABLE = {"FLAC", "ALAC", "AAC", "MP3", "WAV", "AIFF"}
+FFMPEG_READABLE = READABLE | {"Vorbis", "Opus", "APE", "WAVPACK", "TTA", "MPC", "WMA", "WMA LOSSLESS", "DSD"}
 ALAC_BITS = {16: 1, 20: 2, 24: 3, 32: 4}  # afconvert 의 alac 깊이 표시
 
 
+def encoder() -> str | None:
+    """변환에 쓸 프로그램 경로. Windows 는 PATH 와 흔한 설치 위치(winget 등)에서 ffmpeg 를 찾는다
+    — winget 으로 막 설치해 아직 PATH 가 반영되지 않았어도 앱을 다시 켜지 않게."""
+    if IS_MAC:
+        return AFCONVERT if os.path.exists(AFCONVERT) else None
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+    local = os.environ.get("LOCALAPPDATA", "")
+    cands = [os.path.join(local, "Microsoft", "WinGet", "Links", "ffmpeg.exe"), os.path.join("C:\\", "ffmpeg", "bin", "ffmpeg.exe")]
+    cands += sorted(glob.glob(os.path.join(local, "Microsoft", "WinGet", "Packages", "*FFmpeg*", "*", "bin", "ffmpeg.exe")))
+    cands += [os.path.join(os.environ.get(k, ""), "ffmpeg", "bin", "ffmpeg.exe") for k in ("ProgramFiles", "USERPROFILE")]
+    return next((c for c in cands if os.path.isfile(c)), None)
+
+
 def available() -> bool:
-    return os.path.exists(AFCONVERT)
+    return encoder() is not None
+
+
+def _readable():
+    return READABLE if IS_MAC else FFMPEG_READABLE
 
 
 @dataclass
@@ -49,7 +73,7 @@ def plan(files, target: str) -> list[Job]:
     for f in files:
         j = Job(f)
         jobs.append(j)
-        if f.codec not in READABLE:
+        if f.codec not in _readable():
             j.skip = f"{f.codec or f.ext.lstrip('.').upper()} 은(는) 바꿀 수 없음"
             continue
         if f.codec == want and (want == "ALAC" or abs((f.bitrate or 0) - _bitrate(target)) < 16000):
@@ -79,14 +103,39 @@ def _args(f: AudioFile, target: str) -> list[str]:
     return ["-f", "m4af", "-d", "aac", "-s", "2", "-b", str(_bitrate(target)), "-q", "127"]
 
 
+def _ffmpeg_args(f: AudioFile, target: str) -> list[str]:
+    """ffmpeg 인코더 설정 — 태그·커버는 LocalTag 가 옮기므로 소리만 (-map_metadata -1)."""
+    if target == "alac":
+        bits = f.bits if f.bits in ALAC_BITS else (24 if f.codec == "DSD" else 16)
+        codec = ["-c:a", "alac", "-sample_fmt", "s16p" if bits <= 16 else "s32p"]
+        if bits > 16:
+            codec += ["-bits_per_raw_sample", str(bits)]
+    else:  # ffmpeg 내장 AAC (Windows 의 aac_mf 는 192kbps 까지만)
+        codec = ["-c:a", "aac", "-b:a", f"{_bitrate(target) // 1000}k"]
+        if f.sample_rate > 48000 or f.codec == "DSD":
+            codec += ["-ar", "48000"]
+    return ["-map", "0:a:0", "-map_metadata", "-1", "-map_chapters", "-1", *codec, "-fflags", "+bitexact", "-f", "ipod"]
+
+
+def _command(f: AudioFile, target: str, tmp: str) -> list[str]:
+    exe = encoder()
+    if not exe:
+        raise RuntimeError("변환 프로그램을 찾지 못했습니다")
+    if IS_MAC:
+        return [exe, *_args(f, target), f.path, tmp]
+    return [exe, "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i", f.path, *_ffmpeg_args(f, target), tmp]
+
+
 def convert_one(job: Job, target: str, opts: Options) -> AudioFile:
     """작업 사본으로 바꾸고 태그·커버를 옮긴 뒤 길이가 같은지 확인하고 제자리로."""
     f = job.f
     tmp = os.path.join(os.path.dirname(job.dst), f".localtag-conv-{uuid.uuid4().hex[:8]}.m4a")
     try:
-        r = subprocess.run([AFCONVERT, *_args(f, target), f.path, tmp], capture_output=True, text=True, timeout=1800)
+        r = subprocess.run(_command(f, target, tmp), stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=1800,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))  # Windows: 콘솔 창을 띄우지 않게
         if r.returncode != 0 or not os.path.exists(tmp):
-            raise RuntimeError((r.stderr or r.stdout or "afconvert 가 실패했습니다").strip().splitlines()[-1])
+            raise RuntimeError(((r.stderr or r.stdout).strip() or "변환 프로그램이 실패했습니다").splitlines()[-1])
         new = AudioFile.load(tmp, opts)
         if f.length and abs((new.length or 0) - f.length) > 1.0:
             raise RuntimeError(f"길이가 다름 ({f.length:.1f}초 → {new.length or 0:.1f}초)")
@@ -132,7 +181,8 @@ class FormatConvertDialog(QDialog):
         self.setWindowTitle("형식 변환")
         self.resize(820, 520)
         v = QVBoxLayout(self)
-        intro = QLabel("맥에 들어 있는 afconvert 로 바꿉니다. 태그와 커버는 그대로 옮기고, 새 파일은 원본과 같은 폴더에 "
+        tool = "맥에 들어 있는 afconvert" if IS_MAC else f"ffmpeg ({encoder() or '찾지 못함'})"
+        intro = QLabel(f"{tool} 로 바꿉니다. 태그와 커버는 그대로 옮기고, 새 파일은 원본과 같은 폴더에 "
                        "<b>.m4a</b> 로 만듭니다. 새 파일을 만드는 작업이라 실행 취소로는 되돌리지 않습니다.")
         intro.setWordWrap(True)
         v.addWidget(intro)
@@ -145,13 +195,16 @@ class FormatConvertDialog(QDialog):
         for k, label in ORIGINALS.items():
             self.orig_box.addItem(label, k)
         self.orig_box.setCurrentIndex(max(0, self.orig_box.findData(settings.value("convert/originals", "keep", str))))
-        self.orig_box.setToolTip("휴지통으로 옮긴 원본은 Finder 의 휴지통에서 다시 꺼낼 수 있습니다")
+        self.orig_box.setToolTip("휴지통으로 옮긴 원본은 휴지통에서 다시 꺼낼 수 있습니다")
         self.add_music = QCheckBox("새 파일을 Music 보관함에 추가")
         self.add_music.setChecked(settings.value("convert/add_music", True, bool))
         self.add_music.setToolTip("원본이 이미 Music 에 있으면(WAV·AIFF 등) 같은 곡이 둘이 됩니다 — 원본 곡은 Music 에서 직접 지우세요")
         form.addRow("바꿀 형식:", self.target_box)
         form.addRow("원본 파일:", self.orig_box)
-        form.addRow("", self.add_music)
+        if IS_MAC:  # Apple Music 연동은 macOS 에서만
+            form.addRow("", self.add_music)
+        else:
+            self.add_music.setChecked(False)
         v.addLayout(form)
         self.table = QTableWidget(len(files), 3)
         self.table.setHorizontalHeaderLabels(["파일", "지금", "결과"])
@@ -196,5 +249,6 @@ class FormatConvertDialog(QDialog):
         self.originals = self.orig_box.currentData()
         self.settings.setValue("convert/target", self.target)
         self.settings.setValue("convert/originals", self.originals)
-        self.settings.setValue("convert/add_music", self.add_music.isChecked())
+        if IS_MAC:
+            self.settings.setValue("convert/add_music", self.add_music.isChecked())
         self.accept()

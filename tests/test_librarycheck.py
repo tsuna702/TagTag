@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from harness import QApplication, check, finish, samples, window  # noqa: E402
 
 from localtag import librarycheck as lc  # noqa: E402
+from localtag.osutil import IS_MAC  # noqa: E402
 
 app = QApplication.instance()
 d = samples()
@@ -110,7 +111,8 @@ for _ in range(200):
     time.sleep(0.02)
 aa = {f.filename: f.get("albumartist") for f in w.model.files}
 check(len(set(aa.values())) == 1, f"앨범 아티스트를 하나로 {aa}")
-check(looked and refreshed, "저장 전에 곡 ID 를 찾고, 저장 뒤 Music 에 반영")
-check(refreshed and all(v == "PID" for v in (refreshed[0][1] or {}).values()), "반영은 찾아 둔 ID 로 (경로로 찾지 않음)")
+if IS_MAC:  # Music 반영은 macOS 에서만 (Windows 는 앨범 점검으로 맞추기까지)
+    check(looked and refreshed, "저장 전에 곡 ID 를 찾고, 저장 뒤 Music 에 반영")
+    check(refreshed and all(v == "PID" for v in (refreshed[0][1] or {}).values()), "반영은 찾아 둔 ID 로 (경로로 찾지 않음)")
 check(not getattr(w, "_music_once", False), "이번만 — 끝나면 다시 끔")
 finish()

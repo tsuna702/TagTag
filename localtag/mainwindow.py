@@ -330,9 +330,8 @@ class MainWindow(QMainWindow):
         self._act(m, "곡명 · 파일명 일괄 변경…", self.batch_rename, "Alt+9")
         m.addSeparator()
         self._act(m, "Apple Music · MusicBrainz 에서 태그 가져오기…", self.tag_source, "Ctrl+Shift+G")
-        if IS_MAC:
-            m.addSeparator()
-            self._act(m, "형식 변환 (FLAC → ALAC · AAC)…", self.convert_formats)
+        m.addSeparator()
+        self._act(m, "형식 변환 (FLAC → ALAC · AAC)…", self.convert_formats)
 
         m = mb.addMenu("커버")
         self._act(m, "앨범아트 찾기 · 가져오기…", self.find_artwork, "Ctrl+Shift+A")
@@ -1222,19 +1221,26 @@ class MainWindow(QMainWindow):
                  lambda msg: QMessageBox.warning(self, "Music 보관함 점검", msg))
 
     def convert_formats(self):
-        """FLAC 등을 Music 이 읽는 ALAC·AAC(.m4a)로 (macOS afconvert). 태그·커버를 옮기고 새 파일을 목록에 넣는다."""
+        """FLAC 등을 Music 이 읽는 ALAC·AAC(.m4a)로 (macOS afconvert · Windows ffmpeg). 태그·커버를 옮기고 새 파일을 목록에 넣는다."""
         files = self._files_for_command()
         if not files:
             return
         from . import formatconv as fc
         if not fc.available():
-            QMessageBox.warning(self, "형식 변환", "afconvert 를 찾지 못했습니다 (/usr/bin/afconvert).")
+            if IS_MAC:
+                QMessageBox.warning(self, "형식 변환", "afconvert 를 찾지 못했습니다 (/usr/bin/afconvert).")
+            else:
+                QMessageBox.information(
+                    self, "형식 변환",
+                    "형식 변환에는 무료 프로그램 ffmpeg 가 필요합니다.\n\n"
+                    "명령 프롬프트나 PowerShell 에서 아래 한 줄로 설치한 뒤 다시 해 보세요 (앱을 다시 켜지 않아도 됩니다):\n\n"
+                    + fc.FFMPEG_INSTALL)
             return
         dlg = fc.FormatConvertDialog(self, files, self.settings)
         if not dlg.exec():
             return
         jobs, target, originals, opts = dlg.jobs, dlg.target, dlg.originals, self.opts
-        add_music = dlg.add_music.isChecked()
+        add_music = IS_MAC and dlg.add_music.isChecked()
 
         def done(result):
             made, failed = result
