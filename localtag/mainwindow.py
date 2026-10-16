@@ -1216,6 +1216,7 @@ class MainWindow(QMainWindow):
         if not dlg.exec():
             return
         jobs, target, originals, opts = dlg.jobs, dlg.target, dlg.originals, self.opts
+        add_music = dlg.add_music.isChecked()
 
         def done(result):
             made, failed = result
@@ -1230,7 +1231,18 @@ class MainWindow(QMainWindow):
             msg = f"{len(made)}곡을 바꿨습니다."
             if failed:
                 msg += "\n\n못 바꾼 곡:\n" + "\n".join(f"· {n}: {why}" for n, why in failed[:20])
-            (QMessageBox.warning if failed else QMessageBox.information)(self, "형식 변환", msg)
+
+            def report(extra=""):
+                (QMessageBox.warning if failed or extra.startswith("\n\n⚠") else QMessageBox.information)(
+                    self, "형식 변환", msg + extra)
+
+            if not (add_music and made):
+                report()
+                return
+            run_task(self, "Music 보관함에 추가하는 중…",
+                     lambda prog, cancelled: music.add_files([new.path for _s, new in made]),
+                     lambda n: report(f"\n\nMusic 보관함에 {n}곡을 추가했습니다."),
+                     lambda err: report(f"\n\n⚠ Music 에 추가하지 못했습니다: {err}"))
 
         run_task(self, "형식 변환 중…", lambda prog, cancelled: fc.run(jobs, target, originals, opts, prog, cancelled),
                  done, lambda msg: QMessageBox.warning(self, "형식 변환", msg))

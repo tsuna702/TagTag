@@ -10,7 +10,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from harness import QApplication, check, finish, samples, window  # noqa: E402
 
-from localtag import formatconv as fc  # noqa: E402
+from localtag import formatconv as fc, music  # noqa: E402
 from localtag.osutil import IS_MAC  # noqa: E402
 
 if not IS_MAC or not fc.available():
@@ -38,8 +38,13 @@ aac_jobs = {j.f.filename: j for j in fc.plan(list(w.model.files), "aac256")}
 check(not aac_jobs["01 곡 1.mp3"].skip, "MP3 → AAC 는 됨")
 
 
+added = []
+music.add_files = lambda paths: (added.extend(paths), len(paths))[1]  # 실제 Music 에는 넣지 않는다
+
+
 def run(self):
     check("2곡" in self.ok_btn.text() or "1곡" in self.ok_btn.text(), f"단추 {self.ok_btn.text()}")
+    check(self.add_music.isChecked(), "Music 에 추가는 기본 켬")
     self.orig_box.setCurrentIndex(self.orig_box.findData("keep"))
     self._accept()
     return 1
@@ -59,9 +64,10 @@ for _ in range(600):
         break
     import time
     time.sleep(0.05)
-check(msgs and msgs[0].startswith("1곡을 바꿨습니다"), f"결과 {msgs}")
+check(msgs and msgs[0].startswith("1곡을 바꿨습니다") and "Music 보관함에 1곡을 추가" in msgs[0], f"결과 {msgs}")
 out = next(p for p in (os.path.join(album, "02 곡 2.m4a"), os.path.join(album, "02 곡 2 (ALAC).m4a")) if os.path.exists(p))
 check(os.path.exists(flac.path), "원본은 그대로")
+check(added == [out], f"새 파일만 Music 에 추가 {added}")
 new = next(f for f in w.model.files if f.path == out)
 check(new.codec == "ALAC" and new.bits == flac.bits, f"ALAC {new.bits}bit (원본 {flac.bits}bit)")
 check(new in w.selected_files(), "새 파일을 목록에 넣고 고름")
@@ -81,4 +87,27 @@ def pcm(p):
 
 
 check(pcm(flac.path) == pcm(out), "무손실: 디코딩한 소리가 바이트 단위로 같음")
+
+# Music 에 추가를 끄면 부르지 않음 (AAC 로 한 번 더)
+added.clear()
+msgs.clear()
+
+
+def run_off(self):
+    self.target_box.setCurrentIndex(self.target_box.findData("aac256"))
+    self.add_music.setChecked(False)
+    self._accept()
+    return 1
+
+
+fc.FormatConvertDialog.exec = run_off
+w.select_files([flac])
+w.convert_formats()
+for _ in range(600):
+    app.processEvents()
+    if msgs:
+        break
+    time.sleep(0.05)
+check(msgs and "Music" not in msgs[0] and not added, f"Music 에 추가 끔 → 부르지 않음 {msgs}")
+check(not w.settings.value("convert/add_music", True, bool), "끈 것을 기억")
 finish()

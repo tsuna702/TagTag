@@ -725,6 +725,38 @@ def restart(mode=DEFAULT_RESTART, progress=lambda *_: None) -> str:
     return "restarted"
 
 
+# 파일을 보관함에 추가 (Music 설정의 '보관함에 추가할 때 파일을 Music 폴더로 복사'를 따른다)
+ADD_SCRIPT = '''
+on run argv
+    set fs to {}
+    repeat with p in argv
+        set end of fs to (POSIX file (contents of p))
+    end repeat
+    tell application "Music"
+        set added to add fs
+    end tell
+    try
+        return (count of added) as text
+    on error
+        if added is missing value then return "0"
+        return "1"
+    end try
+end run
+'''
+
+
+def add_files(paths) -> int:
+    """파일들을 Music 보관함에 추가한다. 추가한 곡 수."""
+    if not paths:
+        return 0
+    ensure_access(launch=True)
+    added = 0
+    for i in range(0, len(paths), 100):
+        out = _osascript(ADD_SCRIPT, *paths[i:i + 100], timeout=600).strip()
+        added += int(out) if out.isdigit() else 0
+    return added
+
+
 def selected_paths():
     """Music에서 지금 선택한 곡들의 파일 경로."""
     out = _osascript(SELECTION_SCRIPT, timeout=60)

@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from PySide6.QtCore import QFile
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHeaderView, QLabel, QTableWidget, QTableWidgetItem, QVBoxLayout,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHeaderView, QLabel, QTableWidget, QTableWidgetItem, QVBoxLayout,
 )
 
 from .tagio import AudioFile, Options
@@ -146,8 +146,12 @@ class FormatConvertDialog(QDialog):
             self.orig_box.addItem(label, k)
         self.orig_box.setCurrentIndex(max(0, self.orig_box.findData(settings.value("convert/originals", "keep", str))))
         self.orig_box.setToolTip("휴지통으로 옮긴 원본은 Finder 의 휴지통에서 다시 꺼낼 수 있습니다")
+        self.add_music = QCheckBox("새 파일을 Music 보관함에 추가")
+        self.add_music.setChecked(settings.value("convert/add_music", True, bool))
+        self.add_music.setToolTip("원본이 이미 Music 에 있으면(WAV·AIFF 등) 같은 곡이 둘이 됩니다 — 원본 곡은 Music 에서 직접 지우세요")
         form.addRow("바꿀 형식:", self.target_box)
         form.addRow("원본 파일:", self.orig_box)
+        form.addRow("", self.add_music)
         v.addLayout(form)
         self.table = QTableWidget(len(files), 3)
         self.table.setHorizontalHeaderLabels(["파일", "지금", "결과"])
@@ -192,4 +196,5 @@ class FormatConvertDialog(QDialog):
         self.originals = self.orig_box.currentData()
         self.settings.setValue("convert/target", self.target)
         self.settings.setValue("convert/originals", self.originals)
+        self.settings.setValue("convert/add_music", self.add_music.isChecked())
         self.accept()
