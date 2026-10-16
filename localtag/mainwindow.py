@@ -25,7 +25,7 @@ from .filterexpr import FilterError, compile_filter
 from .model import COLUMN_WIDTHS, COLUMNS, FileModel, SortProxy, fmt_length, fmt_size
 from .panel import TagPanel, changes_for
 from .rowdrag import RowDragger, move_to
-from .plan import Plan, UndoEntry, UndoItem
+from .plan import Plan, UndoEntry, UndoItem, state_diff, tag_state
 from .safewrite import error_text
 from .tagio import (
     AUDIO_EXTS, FIELD_LABELS, AudioFile, Options, move_file, restore_snapshot, scan, take_snapshot,
@@ -927,6 +927,7 @@ class MainWindow(QMainWindow):
                     new = AudioFile.load(cur_path, self.opts)
                 else:
                     new.path = cur_path  # 저장 직후 읽은 정보를 그대로 쓴다 (이름 바꾸기는 내용을 바꾸지 않는다)
+                entry.items[-1].after = tag_state(new)
                 self.model.replace(f, new)
                 for path, data in p.exports:
                     with open(path, "wb") as fh:
@@ -1022,7 +1023,14 @@ class MainWindow(QMainWindow):
             self._undo_waiting = verb
             self.statusBar().showMessage(f"Music 반영이 끝나면 바로 {verb}합니다…", 10000)
             return
+        skip = self._edited_elsewhere(stack[-1], verb)
+        if skip is None:
+            return
         entry = stack.pop()
+        if skip:  # 다른 곳에서 바뀐 곡은 빼고 되돌린다 — 그 곡들의 기록은 버린다
+            kept = UndoEntry(entry.label, [i for i in entry.items if i.new_path not in skip])
+            kept.album_change = getattr(entry, "album_change", True)
+            entry = kept
         back = UndoEntry(entry.label)
         back.album_change = getattr(entry, "album_change", True)
         by_path = {f.path: f for f in self.model.files}
@@ -1036,7 +1044,7 @@ class MainWindow(QMainWindow):
                     restored = restore_snapshot(item.old_path, item.snapshot, opts=self.opts)
                 else:
                     restored = AudioFile.load(item.old_path, self.opts)
-                rev = UndoItem(item.new_path, item.old_path, now)
+                rev = UndoItem(item.new_path, item.old_path, now, tag_state(restored))
                 rev.pid = getattr(item, "pid", None)
                 back.items.append(rev)
                 f = by_path.get(item.new_path)
@@ -1061,6 +1069,45 @@ class MainWindow(QMainWindow):
             known = {i.old_path: i.pid for i in entry.items if getattr(i, "pid", None)}
             self._music_refresh_paths(restored_paths, modal=False,
                                       album_change=back.album_change, known_pids=known)
+
+    def _edited_elsewhere(self, entry, verb):
+        """되돌릴 곡 가운데 저장한 뒤 Music 등 다른 곳에서 태그가 바뀐 곡을 찾아 묻는다.
+        → None: 그만둠, set(): 그대로 되돌림, {경로…}: 그 곡은 빼고 되돌림."""
+        changed = []
+        for item in entry.items:
+            if item.after is None or not os.path.exists(item.new_path):
+                continue
+            try:
+                now = tag_state(AudioFile.load(item.new_path, self.opts))
+            except Exception:
+                continue
+            diff = state_diff(item.after, now)
+            if diff:
+                changed.append((item.new_path, diff))
+        if not changed:
+            return set()
+        lines = "\n".join(f"· {os.path.basename(p)} — {', '.join(d[:4])}{' …' if len(d) > 4 else ''}"
+                          for p, d in changed[:10])
+        more = f"\n… 외 {len(changed) - 10}곡" if len(changed) > 10 else ""
+        text = (f"{entry.label} 뒤에 Music 등 다른 곳에서 태그가 바뀐 곡이 {len(changed)}곡 있습니다.\n"
+                f"{verb}하면 그 변경도 함께 사라집니다.\n\n{lines}{more}")
+        choice = self._ask_elsewhere(verb, text, can_skip=len(changed) < len(entry.items))
+        if choice == "all":
+            return set()
+        if choice == "some":
+            return {p for p, _ in changed}
+        return None
+
+    def _ask_elsewhere(self, verb, text, can_skip) -> str | None:
+        """→ 'all' / 'some' / None (테스트에서 바꿔 끼운다)"""
+        box = QMessageBox(QMessageBox.Warning, verb, text, parent=self)
+        all_btn = box.addButton(f"모두 {verb}", QMessageBox.DestructiveRole)
+        some_btn = box.addButton("바뀐 곡은 빼고", QMessageBox.AcceptRole)
+        box.addButton("취소", QMessageBox.RejectRole)
+        box.setDefaultButton(some_btn if can_skip else all_btn)
+        some_btn.setEnabled(can_skip)
+        box.exec()
+        return {all_btn: "all", some_btn: "some"}.get(box.clickedButton())
 
     # ------------------------------------------------------------ 변환기 · 액션
     def _files_for_command(self):

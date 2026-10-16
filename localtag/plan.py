@@ -53,6 +53,21 @@ class UndoItem:
     old_path: str
     new_path: str
     snapshot: Snapshot | None
+    after: tuple | None = None  # 저장 직후 태그 상태 (tag_state) — 되돌리기 전에 다른 곳에서 바뀌었는지 본다
+
+
+def tag_state(af: AudioFile) -> tuple:
+    """비교용 태그 상태: (필드 값, 커버 크기들). 커버 데이터는 담지 않는다 (메모리)."""
+    return ({k: tuple(v) for k, v in af.tags.items() if v}, tuple(len(p.data) for p in af.pictures))
+
+
+def state_diff(before: tuple, now: tuple) -> list[str]:
+    """두 태그 상태에서 달라진 필드 이름 (사람이 읽는)."""
+    a, b = before[0], now[0]
+    out = [FIELD_LABELS.get(k, k) for k in sorted(set(a) | set(b), key=str) if a.get(k) != b.get(k)]
+    if before[1] != now[1]:
+        out.append("커버")
+    return out
 
 
 @dataclass(eq=False)
