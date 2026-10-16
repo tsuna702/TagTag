@@ -10,7 +10,7 @@
   NOT, AND, OR, ( )                      조합
   "%artist% - %title%" HAS 사랑          포맷 문자열로 비교
   $len(%title%) GREATER 30
-그 밖의 입력은 파일명과 모든 필드에서 찾는다 (여러 단어는 모두 포함).
+그 밖의 입력은 그냥 단어로 보고 찾는다 (여러 단어는 모두 포함). 찾을 곳(scope)은 SCOPES 에서 고른다.
 """
 from __future__ import annotations
 
@@ -25,6 +25,15 @@ ALIASES = {"filename": "%_filename_ext%", "path": "%_path%", "folder": "%_direct
            "ext": "%_extension%", "length": "%_length_seconds%", "bitrate": "%_bitrate%",
            "samplerate": "%_samplerate%", "bits": "%_bitspersample%", "codec": "%_codec%",
            "lossless": "%_lossless%", "quality": "%_quality%", "cover": "%_has_cover%"}
+
+
+# 그냥 단어로 찾을 때 볼 곳: 키 → (이름, 볼 필드 — None 이면 모든 필드)
+SCOPES = {
+    "all": ("모든 필드", None),
+    "name": ("제목 · 파일명", ("_filename", "title")),
+    "artist": ("아티스트", ("artist", "albumartist")),
+    "album": ("앨범", ("album",)),
+}
 
 
 class FilterError(Exception):
@@ -187,8 +196,8 @@ def _eval(node, ctx):
     return {"GREATER": a > b, "LESS": a < b, "EQUAL": a == b}[op]
 
 
-def compile_filter(text: str):
-    """문자열 → (AudioFile → bool) 함수. 빈 문자열이면 None."""
+def compile_filter(text: str, scope: str = "all"):
+    """문자열 → (AudioFile → bool) 함수. 빈 문자열이면 None. scope 는 그냥 단어로 찾을 때만 쓴다."""
     text = text.strip()
     if not text:
         return None
@@ -210,7 +219,13 @@ def compile_filter(text: str):
 
     words = [w.casefold() for k, w in toks if k in ("word", "str", "kw")]
 
+    names = SCOPES.get(scope, SCOPES["all"])[1]
+
     def plain(af):
-        hay = " ".join([af.filename] + [af.get(n) for n in af.tags]).casefold()
+        if names is None:
+            parts = [af.filename] + [af.get(n) for n in af.tags]
+        else:
+            parts = [af.filename if n == "_filename" else af.get(n) for n in names]
+        hay = " ".join(parts).casefold()
         return all(w in hay for w in words)
     return plain

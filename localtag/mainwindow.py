@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from PySide6.QtCore import QEvent, QItemSelection, QItemSelectionModel, QSettings, QStandardPaths, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QFileDialog, QHeaderView, QLabel, QLineEdit, QMainWindow,
+    QAbstractItemView, QApplication, QComboBox, QFileDialog, QHeaderView, QLabel, QLineEdit, QMainWindow,
     QHBoxLayout, QMenu, QMessageBox, QProgressDialog, QPushButton, QScrollArea, QSplitter, QTableView,
     QToolBar, QToolButton, QVBoxLayout, QWidget,
 )
@@ -21,7 +21,7 @@ from .backup import BackupStore
 from .actions import ActionStore, describe, new_action, run_actions
 from .converters import CONVERTERS, AutoNumber
 from .filetrack import find_moved
-from .filterexpr import FilterError, compile_filter
+from .filterexpr import SCOPES as FILTER_SCOPES, FilterError, compile_filter
 from .model import COLUMN_WIDTHS, COLUMNS, FileModel, SortProxy, fmt_length, fmt_size
 from .panel import TagPanel, changes_for
 from .rowdrag import RowDragger, move_to
@@ -176,6 +176,14 @@ class MainWindow(QMainWindow):
         frow = QHBoxLayout()
         frow.setSpacing(4)
         frow.addWidget(self.filter_edit, 1)
+        self.filter_scope = QComboBox()
+        for k, (label, _names) in FILTER_SCOPES.items():
+            self.filter_scope.addItem(label, k)
+        self.filter_scope.setCurrentIndex(max(0, self.filter_scope.findData(self.settings.value("filter_scope", "all", str))))
+        self.filter_scope.setToolTip("그냥 단어로 찾을 때 볼 곳 (artist HAS … 같은 조건식에는 쓰지 않음)")
+        self.filter_scope.setFocusPolicy(Qt.NoFocus)
+        self.filter_scope.currentIndexChanged.connect(self._filter_scope_changed)
+        frow.addWidget(self.filter_scope)
         quick = QToolButton()
         quick.setText("빠른 필터")
         quick.setToolTip("자주 쓰는 조건을 골라 필터에 넣기 (커버 없는 곡, 낮은 음질 …)")
@@ -1834,10 +1842,14 @@ class MainWindow(QMainWindow):
         self.filter_edit.setFocus()
         self.filter_edit.selectAll()
 
+    def _filter_scope_changed(self, *_):
+        self.settings.setValue("filter_scope", self.filter_scope.currentData())
+        self.apply_filter()
+
     def apply_filter(self):
         text = self.filter_edit.text()
         try:
-            fn = compile_filter(text)
+            fn = compile_filter(text, self.filter_scope.currentData())
             self.filter_edit.setStyleSheet("")
             self.filter_edit.setToolTip("")
         except FilterError as e:
