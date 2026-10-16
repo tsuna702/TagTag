@@ -60,6 +60,8 @@ class Release:
     country: str = ""  # 찾은 스토어 (곡 목록도 먼저 여기서) · MusicBrainz 는 발매 국가
     tracks: list = field(default_factory=list)
     source: str = "apple"  # apple / mb
+    group: str = ""  # MusicBrainz release group (같은 앨범의 여러 판)
+    artwork_from: str = ""  # 커버를 다른 곳에서 빌려 왔으면 그 설명 (MusicBrainz 에 커버가 없을 때)
 
     def country_name(self) -> str:
         return COUNTRIES.get(self.country) or MB_COUNTRIES.get(self.country) or self.country.upper()
@@ -311,7 +313,54 @@ def mb_lookup(mbid: str) -> Release:
                                     t.get("title", ""), _credit(t.get("artist-credit")) or rel.artist,
                                     (t.get("length") or 0) / 1000))
     rel.count = len(rel.tracks) or rel.count
+    rel.group = rg.get("id", "")
     return rel
+
+
+CAA = "https://coverartarchive.org/"
+
+
+def find_cover(rel: Release, country: str = "kr") -> bool:
+    """MusicBrainz 앨범에 커버가 없으면 ① 같은 앨범의 다른 판(release group) 커버
+    ② Apple Music 에서 이름이 거의 같은 앨범의 커버를 빌려 온다. 찾으면 True."""
+    group = rel.group
+    term = rel.album if rel.artist.lower() in ("", "various artists") else f"{rel.artist} {rel.album}"
+
+    def caa():
+        if not group:
+            return None
+        try:
+            imgs = _json(f"{CAA}release-group/{group}").get("images", [])
+        except SourceError:  # 커버가 하나도 없으면 404
+            return None
+        return any(i.get("front") for i in imgs)
+
+    def store(c):
+        return lambda: _json("https://itunes.apple.com/search?" + parse.urlencode(
+            {"term": term, "country": c, "media": "music", "entity": "album", "limit": 25})).get("results", [])
+
+    got = _together(caa, *[store(c) for c in dict.fromkeys([country, "jp", "us"])])
+    if got[0] is True:
+        rel.artwork = f"{CAA}release-group/{group}/front"
+        rel.artwork_from = "MusicBrainz 의 같은 앨범 다른 판"
+        return True
+    best = None
+    for res in got[1:]:
+        if isinstance(res, SourceError):
+            continue
+        for x in res:
+            if not x.get("artworkUrl100"):
+                continue
+            s = similarity(x.get("collectionName", ""), rel.album)
+            if rel.count and int(x.get("trackCount") or 0) == rel.count:
+                s += 0.1
+            if best is None or s > best[0]:
+                best = (s, x)
+    if best and best[0] >= 0.8:
+        rel.artwork = best[1]["artworkUrl100"]
+        rel.artwork_from = f"Apple Music 「{best[1].get('collectionName', '')}」"
+        return True
+    return False
 
 
 def find(term: str, country: str = "kr", musicbrainz: bool = True) -> list[Release]:
@@ -334,11 +383,16 @@ def find(term: str, country: str = "kr", musicbrainz: bool = True) -> list[Relea
 
 def get(rel: Release, country: str = "kr") -> Release:
     """검색 결과 하나의 곡 목록까지."""
-    return mb_lookup(rel.id) if rel.source == "mb" else lookup(rel.id, country)
+    if rel.source != "mb":
+        return lookup(rel.id, country)
+    got = mb_lookup(rel.id)
+    if not got.artwork:
+        find_cover(got, country)
+    return got
 
 
 def cover_url(rel: Release, size: int) -> str:
-    if rel.source == "mb":  # Cover Art Archive 는 250·500·1200 과 원본만
+    if rel.artwork.startswith(CAA):  # Cover Art Archive 는 250·500·1200 과 원본만
         return rel.artwork + ("-250" if size <= 250 else "-500" if size <= 600 else "-1200" if size <= 1500 else "")
     from .extract import hi_res
     return hi_res(rel.artwork, size)

@@ -235,7 +235,8 @@ class TagSourceDialog(QDialog):
     def _set_release(self, rel):
         self.rel = rel
         bits = " · ".join(x for x in (rel.year, rel.genre, f"곡 {len(rel.tracks)}개", ts.SOURCES[rel.source]) if x)
-        nocover = " · 커버 없음" if not rel.artwork else ""
+        nocover = (" · 커버 없음" if not rel.artwork else
+                   f" · <span style='color:gray'>커버: {rel.artwork_from}</span>" if rel.artwork_from else "")
         self.album_label.setText(f"<b>{rel.album}</b> — {rel.artist} · {bits}{nocover}")
         self._show_preview(rel)
         for i in range(len(self.files)):
