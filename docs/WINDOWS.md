@@ -103,3 +103,5 @@ v1.0.11 — 맥에서 냄: 1.0.8~1.0.10 을 맥에서 tests/ 모두 PASS 확인.
   그래서 YouTube 제목 정리·커버 짝짓기·같은 곡 찾기·일괄 변경을 만들었다.
 - 앨범아트 추출기(예전 별도 앱)는 0.7.0 에서 LocalTag 에 합쳤고, 예전 앱은 지웠다.
 - macOS 테스트 실행 폴더는 맥의 임시 폴더에 있었고 저장소에는 없다. 저장소의 `tests/` 가 앞으로의 기준이다.
+v1.0.12~1.0.15 — 맥에서 냄: 정렬용 이름 열(모든 OS), MusicBrainz 커버 보충(모든 OS), **Music 보관함 점검·형식 변환은 macOS 전용**
+(`librarycheck.py` 는 iTunesLibrary, `formatconv.py` 는 afconvert — 메뉴도 `IS_MAC` 일 때만. `test_formatconv.py` 는 Windows 에서 건너뜀).

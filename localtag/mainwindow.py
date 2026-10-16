@@ -226,7 +226,7 @@ class MainWindow(QMainWindow):
         from . import artworkdialog, backupdialog, compare, covermatch, dupes, export, extractdialog, exttags, rename, renamedialog, ytclean, ytdialog  # noqa: F401
         from . import albumcheck, tagsource, tagsourcedialog  # noqa: F401
         if IS_MAC:
-            from . import librarycheck  # noqa: F401
+            from . import formatconv, librarycheck  # noqa: F401
 
     def _prune_backups(self):
         try:
@@ -322,6 +322,9 @@ class MainWindow(QMainWindow):
         self._act(m, "곡명 · 파일명 일괄 변경…", self.batch_rename, "Alt+9")
         m.addSeparator()
         self._act(m, "Apple Music · MusicBrainz 에서 태그 가져오기…", self.tag_source, "Ctrl+Shift+G")
+        if IS_MAC:
+            m.addSeparator()
+            self._act(m, "형식 변환 (FLAC → ALAC · AAC)…", self.convert_formats)
 
         m = mb.addMenu("커버")
         self._act(m, "앨범아트 찾기 · 가져오기…", self.find_artwork, "Ctrl+Shift+A")
@@ -1152,6 +1155,38 @@ class MainWindow(QMainWindow):
 
         run_task(self, "Music 보관함을 읽는 중…", lambda prog, cancelled: lc.analyze(lc.read_library()), done,
                  lambda msg: QMessageBox.warning(self, "Music 보관함 점검", msg))
+
+    def convert_formats(self):
+        """FLAC 등을 Music 이 읽는 ALAC·AAC(.m4a)로 (macOS afconvert). 태그·커버를 옮기고 새 파일을 목록에 넣는다."""
+        files = self._files_for_command()
+        if not files:
+            return
+        from . import formatconv as fc
+        if not fc.available():
+            QMessageBox.warning(self, "형식 변환", "afconvert 를 찾지 못했습니다 (/usr/bin/afconvert).")
+            return
+        dlg = fc.FormatConvertDialog(self, files, self.settings)
+        if not dlg.exec():
+            return
+        jobs, target, originals, opts = dlg.jobs, dlg.target, dlg.originals, self.opts
+
+        def done(result):
+            made, failed = result
+            if originals == "trash":
+                gone = {src for src, _new in made}
+                self.model.remove([f for f in self.model.files if f.path in gone])
+            if made:
+                news = [new for _src, new in made]
+                self.model.add_files(news)
+                self.select_files(news)
+                self._update_status()
+            msg = f"{len(made)}곡을 바꿨습니다."
+            if failed:
+                msg += "\n\n못 바꾼 곡:\n" + "\n".join(f"· {n}: {why}" for n, why in failed[:20])
+            (QMessageBox.warning if failed else QMessageBox.information)(self, "형식 변환", msg)
+
+        run_task(self, "형식 변환 중…", lambda prog, cancelled: fc.run(jobs, target, originals, opts, prog, cancelled),
+                 done, lambda msg: QMessageBox.warning(self, "형식 변환", msg))
 
     def check_albums(self):
         """같은 앨범 안의 태그 차이(앨범 아티스트·컴필레이션·총수·커버 등)를 찾아 맞춘다."""

@@ -1,0 +1,84 @@
+"""형식 변환 (macOS afconvert): FLAC → ALAC 는 같은 소리(디코딩 결과 같음)·태그·커버 그대로, 손실 → ALAC 는 건너뜀,
+원본 휴지통 옮기기는 시험하지 않고 '그대로 두기'만 (실제 휴지통을 건드리지 않게).
+
+실행: python tests/test_formatconv.py
+"""
+import os
+import subprocess
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from harness import QApplication, check, finish, samples, window  # noqa: E402
+
+from localtag import formatconv as fc  # noqa: E402
+from localtag.osutil import IS_MAC  # noqa: E402
+
+if not IS_MAC or not fc.available():
+    print("macOS 전용 — 건너뜀")
+    finish()
+    sys.exit(0)
+
+app = QApplication.instance()
+d = samples()
+album = os.path.join(d, "아이유 - 꽃갈피")
+w = window()
+w.load_paths([album], replace=True)
+app.processEvents()
+by = {f.filename: f for f in w.model.files}
+flac = by["02 곡 2.flac"]
+flac_tags = {k: v for k, v in flac.tags.items() if v}
+check(flac.pictures, "원본 FLAC 에 커버 있음")
+
+jobs = fc.plan(list(w.model.files), "alac")
+why = {j.f.filename: (j.skip, os.path.basename(j.dst)) for j in jobs}
+check(why["02 곡 2.flac"] == ("", "02 곡 2.m4a") or why["02 곡 2.flac"] == ("", "02 곡 2 (ALAC).m4a"),
+      f"FLAC → .m4a {why['02 곡 2.flac']}")
+check("음질이 좋아지지 않음" in why["01 곡 1.mp3"][0], f"MP3 → ALAC 는 건너뜀 {why['01 곡 1.mp3']}")
+aac_jobs = {j.f.filename: j for j in fc.plan(list(w.model.files), "aac256")}
+check(not aac_jobs["01 곡 1.mp3"].skip, "MP3 → AAC 는 됨")
+
+
+def run(self):
+    check("2곡" in self.ok_btn.text() or "1곡" in self.ok_btn.text(), f"단추 {self.ok_btn.text()}")
+    self.orig_box.setCurrentIndex(self.orig_box.findData("keep"))
+    self._accept()
+    return 1
+
+
+fc.FormatConvertDialog.exec = run
+from PySide6.QtWidgets import QMessageBox  # noqa: E402
+msgs = []
+QMessageBox.information = lambda *a, **k: msgs.append(a[2])
+QMessageBox.warning = lambda *a, **k: msgs.append("경고 " + a[2])
+w.table.clearSelection()
+w.select_files([flac])
+w.convert_formats()
+for _ in range(600):
+    app.processEvents()
+    if msgs:
+        break
+    import time
+    time.sleep(0.05)
+check(msgs and msgs[0].startswith("1곡을 바꿨습니다"), f"결과 {msgs}")
+out = next(p for p in (os.path.join(album, "02 곡 2.m4a"), os.path.join(album, "02 곡 2 (ALAC).m4a")) if os.path.exists(p))
+check(os.path.exists(flac.path), "원본은 그대로")
+new = next(f for f in w.model.files if f.path == out)
+check(new.codec == "ALAC" and new.bits == flac.bits, f"ALAC {new.bits}bit (원본 {flac.bits}bit)")
+check(new in w.selected_files(), "새 파일을 목록에 넣고 고름")
+got = {k: v for k, v in new.tags.items() if v}
+check(all(got.get(k) == v for k, v in flac_tags.items()), f"태그 그대로 {flac_tags} → {got}")
+check([p.data for p in new.pictures] == [p.data for p in flac.pictures], "커버 그대로")
+check(not [n for n in os.listdir(album) if n.startswith(".localtag-conv-")], "작업 사본 남지 않음")
+
+
+def pcm(p):
+    tmp = p + ".wav"
+    subprocess.run(["/usr/bin/afconvert", "-f", "WAVE", "-d", "LEI16", p, tmp], check=True)
+    with open(tmp, "rb") as fh:
+        data = fh.read()[44:]
+    os.remove(tmp)
+    return data
+
+
+check(pcm(flac.path) == pcm(out), "무손실: 디코딩한 소리가 바이트 단위로 같음")
+finish()
