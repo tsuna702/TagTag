@@ -225,6 +225,8 @@ class MainWindow(QMainWindow):
         바뀌어도(새로 빌드) 나중에 창을 열 때 다른 버전의 모듈을 읽지 않게 한다."""
         from . import artworkdialog, backupdialog, compare, covermatch, dupes, export, extractdialog, exttags, rename, renamedialog, ytclean, ytdialog  # noqa: F401
         from . import albumcheck, tagsource, tagsourcedialog  # noqa: F401
+        if IS_MAC:
+            from . import librarycheck  # noqa: F401
 
     def _prune_backups(self):
         try:
@@ -385,6 +387,7 @@ class MainWindow(QMainWindow):
             grp.addAction(a)
         m.addSeparator()
         self._act(m, "Music에서 선택한 곡 추가", self.music_add_selection, "Ctrl+Shift+I")
+        self._act(m, "Music 보관함 점검… (커버 없음 · 갈라진 앨범 · 파일 없음)", self.library_check)
         m.addSeparator()
         self._act(m, "Music 권한 확인", self.music_check)
         self._act(m, "Music 권한 설정 열기…", music.open_privacy_settings)
@@ -1136,6 +1139,19 @@ class MainWindow(QMainWindow):
         dlg = TagSourceDialog(self, files, self.settings)
         if dlg.exec() and dlg.plans:
             self.apply_plans(dlg.plans, "Apple Music 에서 태그 가져오기")
+
+    def library_check(self):
+        """Music 보관함을 읽기만 해서 커버 없는 곡 · 갈라진 앨범 · 파일 없는 곡을 찾고, 고른 곡을 목록으로 연다."""
+        self._confirm_pending()
+        from . import librarycheck as lc
+
+        def done(report):
+            dlg = lc.LibraryCheckDialog(self, report)
+            if dlg.exec() and dlg.picked:
+                self.load_paths(dlg.picked, replace=True)
+
+        run_task(self, "Music 보관함을 읽는 중…", lambda prog, cancelled: lc.analyze(lc.read_library()), done,
+                 lambda msg: QMessageBox.warning(self, "Music 보관함 점검", msg))
 
     def check_albums(self):
         """같은 앨범 안의 태그 차이(앨범 아티스트·컴필레이션·총수·커버 등)를 찾아 맞춘다."""

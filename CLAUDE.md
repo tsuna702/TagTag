@@ -76,3 +76,4 @@ Mp3tag 를 본뜬 음악 태그 편집기. Python 3 + PySide6(Qt) + mutagen. Git
 | `artwork*.py`, `covermatch.py`, `extract*.py` | 앨범아트 찾기·짝짓기·추출 |
 | `backup*.py` | 원본 백업 |
 | `music.py`, `filetrack.py` | **macOS 전용** Apple Music 연동, 옮겨진 파일 찾기 |
+| `librarycheck.py` | **macOS 전용** Music 보관함 점검 (iTunesLibrary 로 읽기만 — Music 에 스크립트를 보내지 않음) |
