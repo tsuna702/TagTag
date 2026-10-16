@@ -13,6 +13,7 @@ from PySide6.QtCore import QBuffer, QByteArray, QIODevice, Qt  # noqa: E402
 from PySide6.QtGui import QColor, QImage  # noqa: E402
 
 from localtag import artwork as art, music  # noqa: E402
+from localtag.osutil import IS_MAC  # noqa: E402
 from localtag.plan import Plan  # noqa: E402
 
 app = QApplication.instance()
@@ -66,7 +67,10 @@ files = sorted(w.model.files, key=lambda f: f.filename)
 pic = art.process(jpeg(300, 300, "#cc3333"), 0)
 w.apply_plans([Plan(files[0], pictures=[pic]), Plan(files[1], changes={"title": ["제목만"]})], "커버")
 w._music_once = False
-check(got and got[0][1] == ["01 곡 1.mp3"] and len(got[0][0]) == 2, f"커버를 바꾼 곡만 커버 확인 {got}")
+if IS_MAC:  # 저장 뒤 Music 반영은 macOS 에서만
+    check(got and got[0][1] == ["01 곡 1.mp3"] and len(got[0][0]) == 2, f"커버를 바꾼 곡만 커버 확인 {got}")
+else:
+    check(not got, "Windows: 저장 뒤 Music 반영 없음")
 
 # ---- 반영 흐름 전체: 새로 읽은 뒤 커버를 바꾼 곡만 fix_artwork, 다시 지정하면 상태 줄에 알림
 from localtag.mainwindow import MainWindow  # noqa: E402

@@ -108,3 +108,4 @@ v1.0.15 Windows zip — Windows 에서 합쳐 tests/ 16개 모두 PASS(형식 �
 (`librarycheck.py` 는 iTunesLibrary — 메뉴도 `IS_MAC` 일 때만. `formatconv.py` 는 1.0.21 부터 Windows 도 ffmpeg 로 — 아래 v1.0.21).
 v1.0.16~1.0.20 — 맥에서 냄 (실행 취소 전 다른 곳에서 바뀐 곡 묻기, 형식 변환 → Music 에 추가, 보관함 점검에서 앨범 맞추기, 태그 가져오기 정렬·확인, 필터 '찾을 곳').
 v1.0.21 — Windows 에서 냄: 1.0.16~1.0.20 을 합쳐 tests/ 모두 PASS (`test_librarycheck.py` 의 Music 반영 확인은 macOS 만). **형식 변환을 Windows 에도** — 설치한 ffmpeg(PATH·winget·C:fmpeg) 로, ALAC 은 비트 깊이 그대로·디코딩 결과 같음, AAC 는 ffmpeg 내장 인코더(aac_mf 는 192k 까지라 안 씀), 콘솔 창 안 띄움, ffmpeg 가 없으면 winget 설치 안내. Music 에 추가는 macOS 만. **맥의 다음 릴리스는 1.0.22**.
+v1.0.22~1.0.23 — 맥에서 냄 (Music 커버 다시 지정은 macOS 만, 커버 맞춤 여백 검정·흰색·투명은 모든 OS, 형식 변환 전에 한 번 더 묻기). Windows 에서 합쳐 tests/ 19개 모두 PASS (	est_cover_fix.py 의 저장 뒤 Music 반영 확인은 macOS 만), 실제 exe 로 형식 변환 확인 창(Ctrl+Z 표시)까지 확인. 같은 코드로 v1.0.23 에 Windows zip 을 붙임 (1.0.22 Windows zip 은 없다). **맥의 다음 릴리스는 1.0.24**.
