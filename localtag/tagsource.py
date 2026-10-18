@@ -40,6 +40,8 @@ class Track:
     title: str
     artist: str
     length: float  # 초
+    composer: str = ""
+    isrc: str = ""
 
     def label(self) -> str:
         n = f"{self.disc}-{self.num:02d}" if self.discs > 1 else f"{self.num:02d}"
@@ -62,6 +64,11 @@ class Release:
     source: str = "apple"  # apple / mb
     group: str = ""  # MusicBrainz release group (같은 앨범의 여러 판)
     artwork_from: str = ""  # 커버를 다른 곳에서 빌려 왔으면 그 설명 (MusicBrainz 에 커버가 없을 때)
+    record_label: str = ""  # 레이블
+    upc: str = ""  # 바코드
+    date: str = ""  # 발매일 (연-월-일)
+    compilation: bool = False
+    details: str = ""  # 작곡가 등 자세한 정보를 못 받았으면 그 이유
 
     def country_name(self) -> str:
         return COUNTRIES.get(self.country) or MB_COUNTRIES.get(self.country) or self.country.upper()
@@ -246,6 +253,72 @@ def lookup(album_id: str, country: str = "kr") -> Release:
     return rel
 
 
+# ------------------------------------------------------------------ Apple Music 카탈로그 (작곡가 등)
+
+AMP = "https://amp-api.music.apple.com/v1/catalog/"
+_amp_lock = threading.Lock()
+_amp_token = {"tok": "", "at": 0.0}
+
+
+def _amp_headers() -> dict:
+    """Apple Music 웹 플레이어가 쓰는 공개 토큰 (iTunes 검색 API 에는 작곡가 등이 없다). 30분 동안 다시 쓴다."""
+    from . import extract as ex
+    with _amp_lock:
+        if not _amp_token["tok"] or time.monotonic() - _amp_token["at"] > 1800:
+            try:
+                html = art.fetch("https://music.apple.com/us/browse", ex.PAGE_LIMIT, ex.BROWSER).decode("utf-8", "replace")
+                m = re.search(r'src="(/assets/index[^"]*\.js)"', html)
+                js = art.fetch("https://music.apple.com" + m.group(1), ex.JS_LIMIT, ex.BROWSER).decode("utf-8", "replace")
+                tok = re.search(r"eyJ[\w-]+\.[\w-]+\.[\w-]+", js).group(0)
+            except (art.ArtworkError, AttributeError) as e:
+                raise SourceError("Apple Music 의 자세한 정보(작곡가 등)를 받지 못했습니다.") from e
+            _amp_token.update(tok=tok, at=time.monotonic())
+        return {**ex.BROWSER, "Authorization": f"Bearer {_amp_token['tok']}", "Origin": "https://music.apple.com"}
+
+
+def _amp_album(album_id: str, country: str) -> dict:
+    """카탈로그의 앨범과 곡 (작곡가·ISRC·레이블·바코드·발매일·컴필레이션).
+    고른 스토어에 없는 앨범이면(404) 일본·미국 스토어에서 찾는다."""
+    h = _amp_headers()
+    d, err = None, None
+    for c in dict.fromkeys([country, "jp", "us"]):
+        try:
+            d = _json(f"{AMP}{c}/albums/{album_id}?include=tracks", h)
+            break
+        except SourceError as e:
+            err = e
+            if "404" not in str(e):
+                raise
+    if d is None:
+        raise SourceError("Apple Music 카탈로그에서 이 앨범의 자세한 정보(작곡가 등)를 찾지 못했습니다.") from err
+    album = (d.get("data") or [{}])[0]
+    tracks = ((album.get("relationships") or {}).get("tracks") or {})
+    songs, nxt = list(tracks.get("data") or []), tracks.get("next")
+    while nxt:  # 곡이 많은 앨범은 나눠서 온다
+        more = _json("https://amp-api.music.apple.com" + nxt, h)
+        songs += more.get("data") or []
+        nxt = more.get("next")
+    return {"album": album.get("attributes") or {}, "songs": [x.get("attributes") or {} for x in songs]}
+
+
+def _add_details(rel: Release, got):
+    """iTunes 에서 받은 앨범에 카탈로그의 자세한 정보를 붙인다 (디스크·트랙 번호로 짝짓기)."""
+    if isinstance(got, SourceError) or not got.get("album"):
+        rel.details = str(got) if isinstance(got, SourceError) else "자세한 정보 없음"
+        return
+    a = got["album"]
+    rel.record_label = a.get("recordLabel", "")
+    rel.upc = a.get("upc", "")
+    rel.date = a.get("releaseDate", "")
+    rel.compilation = bool(a.get("isCompilation"))
+    rel.copyright = a.get("copyright") or rel.copyright
+    by_num = {(int(x.get("discNumber") or 1), int(x.get("trackNumber") or 0)): x for x in got["songs"]}
+    for t in rel.tracks:
+        x = by_num.get((t.disc, t.num), {})
+        t.composer = x.get("composerName", "")
+        t.isrc = x.get("isrc", "")
+
+
 # ------------------------------------------------------------------ MusicBrainz
 
 _mb_lock = threading.Lock()
@@ -298,7 +371,7 @@ def mb_search(term: str, limit: int = 25) -> list[Release]:
 
 
 def mb_lookup(mbid: str) -> Release:
-    x = _mb_json("release/" + mbid, inc="recordings artist-credits release-groups genres")
+    x = _mb_json("release/" + mbid, inc="recordings artist-credits release-groups genres isrcs labels")
     if not x.get("id"):
         raise SourceError("MusicBrainz 에서 앨범 정보를 찾지 못했습니다.")
     rel = _mb_release(x)
@@ -309,11 +382,17 @@ def mb_lookup(mbid: str) -> Release:
     for m in media:
         for i, t in enumerate(m["tracks"], 1):
             num = int(t["position"]) if str(t.get("position", "")).isdigit() else i
+            isrcs = (t.get("recording") or {}).get("isrcs") or []
             rel.tracks.append(Track(int(m.get("position") or 1), len(media), num, len(m["tracks"]),
                                     t.get("title", ""), _credit(t.get("artist-credit")) or rel.artist,
-                                    (t.get("length") or 0) / 1000))
+                                    (t.get("length") or 0) / 1000, isrc=isrcs[0] if isrcs else ""))
     rel.count = len(rel.tracks) or rel.count
     rel.group = rg.get("id", "")
+    labels = [li.get("label", {}).get("name", "") for li in x.get("label-info") or [] if li.get("label")]
+    rel.record_label = next((n for n in labels if n), "")
+    rel.upc = x.get("barcode") or ""
+    rel.date = x.get("date") or rg.get("first-release-date") or ""
+    rel.compilation = (rg.get("secondary-types") or []).count("Compilation") > 0
     return rel
 
 
@@ -384,7 +463,12 @@ def find(term: str, country: str = "kr", musicbrainz: bool = True) -> list[Relea
 def get(rel: Release, country: str = "kr") -> Release:
     """검색 결과 하나의 곡 목록까지."""
     if rel.source != "mb":
-        return lookup(rel.id, country)
+        # 곡 목록(iTunes)과 작곡가 등 자세한 정보(카탈로그)를 동시에 받는다 — 자세한 정보는 못 받아도 그만
+        base, more = _together(lambda: lookup(rel.id, country), lambda: _amp_album(rel.id, country))
+        if isinstance(base, SourceError):
+            raise base
+        _add_details(base, more)
+        return base
     got = mb_lookup(rel.id)
     if not got.artwork:
         find_cover(got, country)
@@ -465,6 +549,20 @@ def changes_for(f: AudioFile, rel: Release, t: Track, fields: set, with_totals: 
         want["year"] = rel.year
     if "genre" in fields and rel.genre:
         want["genre"] = rel.genre
+    if "date" in fields and rel.date:  # 연도 칸에 발매일 전체 (연도보다 먼저 고르면 이것)
+        want["year"] = rel.date
+    if "composer" in fields:
+        want["composer"] = t.composer
+    if "COPYRIGHT" in fields:
+        want["COPYRIGHT"] = rel.copyright
+    if "PUBLISHER" in fields:
+        want["PUBLISHER"] = rel.record_label
+    if "ISRC" in fields:
+        want["ISRC"] = t.isrc
+    if "BARCODE" in fields:
+        want["BARCODE"] = rel.upc
+    if "COMPILATION" in fields and rel.compilation:
+        want["COMPILATION"] = "1"
     if "track" in fields and t.num:
         want["track"] = f"{t.num}/{t.nums}" if with_totals and t.nums else str(t.num)
     if "disc" in fields:

@@ -369,6 +369,7 @@ class MainWindow(QMainWindow):
                   checkable=True, checked=self.opts.safe_save)
         m.addSeparator()
         self._act(m, "백업…", self.show_backups, "Ctrl+Shift+B")
+        self._act(m, "도구 막대 사용자화…", self.customize_toolbar)
         if not IS_MAC:  # macOS 는 앱 메뉴로 옮겨지므로 Windows 에만 도움말 메뉴
             m = mb.addMenu("도움말")
             m.addAction(about)
@@ -403,57 +404,75 @@ class MainWindow(QMainWindow):
         self._act(m, "Music 권한 설정 열기…", music.open_privacy_settings)
 
     def _build_toolbar(self):
+        self.toolbar = None
+        self._tb_hidden = {}
+        self._fill_toolbar()
+
+    def _fill_toolbar(self):
+        """설정에 저장한 단추·순서로 도구 막대를 (다시) 만든다 (설정 → 도구 막대 사용자화)."""
+        from . import toolbar as tbm
+        if self.toolbar is not None:
+            self.removeToolBar(self.toolbar)
+            self.toolbar.deleteLater()
         tb = QToolBar("도구 막대")
         tb.setObjectName("main_toolbar")
         tb.setMovable(False)
         tb.setFloatable(False)
-        tb.setContextMenuPolicy(Qt.PreventContextMenu)
+        tb.setContextMenuPolicy(Qt.CustomContextMenu)
+        tb.customContextMenuRequested.connect(self._toolbar_menu)
         self.addToolBar(Qt.TopToolBarArea, tb)
+        self.toolbar = tb
 
-        def button(text, slot, tip):
-            b = QPushButton(text)
+        def button(key):
+            label, fn, tip, _need = tbm.ITEMS[key]
+            b = QPushButton(label)
             b.setToolTip(tip)
             b.setFocusPolicy(Qt.NoFocus)  # 입력칸에서 쓰던 포커스를 빼앗지 않도록
-            b.clicked.connect(lambda _=False: slot())
-            tb.addWidget(b)
+            b.clicked.connect(lambda _=False, fn=fn: fn(self))
             return b
 
-        self.tb_save = button("저장", self.save, keys("바꾼 태그 저장 (⌘S)"))
-        self.tb_undo = button("되돌리기", self.undo, keys("마지막 작업 되돌리기 (⌘Z)"))
-        self.tb_redo = button("다시 실행", self.redo, keys("되돌린 작업 다시 하기 (⇧⌘Z)"))
-        tb.addSeparator()
-        self.tb_refresh = button("새로고침", self.refresh, "목록의 파일을 다시 읽기 (F5)")
-        self.tb_clear = button("목록 지우기", self.clear_list, "목록 비우기 — 파일은 지우지 않습니다")
-        tb.addSeparator()
-        self.tb_finder = button(REVEAL_LABEL, self.reveal, keys(f"선택한 파일을 {REVEAL_LABEL} (⇧⌘R)"))
-        tb.addSeparator()
-        self.tb_up = button("↑ 위로", lambda: self.move_selection(-1), keys("선택한 곡을 한 칸 위로 (⌥⌘↑)"))
-        self.tb_down = button("↓ 아래로", lambda: self.move_selection(1), keys("선택한 곡을 한 칸 아래로 (⌥⌘↓)"))
-        self.tb_rename = button("일괄 변경…", self.batch_rename,
-                                keys("곡명·파일명을 규칙(바꾸기·붙이기·지우기·번호…)으로 한꺼번에 바꾸기 (⌥9) — 선택한 곡, 선택이 없으면 목록 전체"))
-        self.tb_number = button("트랙 번호…", self.number_tracks,
-                                "목록에 보이는 순서대로 트랙 번호 매기기 — 선택한 곡, 선택이 없으면 목록 전체")
+        self.tb_buttons = {}
+        for key in tbm.load(self.settings):
+            if key == tbm.SEP:
+                tb.addSeparator()
+            else:
+                self.tb_buttons[key] = button(key)
+                tb.addWidget(self.tb_buttons[key])
+        # 다른 곳에서 쓰는 이름 — 도구 막대에서 뺀 단추는 보이지 않는 단추로 둔다
+        for attr in ("save", "undo", "redo", "refresh", "clear", "reveal", "up", "down", "rename", "number"):
+            b = self.tb_buttons.get(attr)
+            if b is None:
+                b = self._tb_hidden.get(attr) or button(attr)
+                self._tb_hidden[attr] = b
+            setattr(self, "tb_" + ("finder" if attr == "reveal" else attr), b)
         self._update_toolbar()
 
+    def _toolbar_menu(self, pos):
+        menu = QMenu(self)
+        menu.addAction("도구 막대 사용자화…", self.customize_toolbar)
+        menu.exec(self.toolbar.mapToGlobal(pos))
+
+    def customize_toolbar(self):
+        from . import toolbar as tbm
+        dlg = tbm.ToolbarDialog(self, tbm.load(self.settings))
+        if dlg.exec():
+            self.settings.setValue("toolbar_items", dlg.result_items)
+            self._fill_toolbar()
+
     def _update_toolbar(self):
-        if not hasattr(self, "tb_save"):
+        if not hasattr(self, "tb_buttons"):
             return
+        from . import toolbar as tbm
         has_files = bool(self.model.files)
-        self.tb_save.setEnabled(self.panel.is_dirty())
-        self.tb_undo.setEnabled(bool(self.undo_stack))
+        has_sel = self.table.selectionModel().hasSelection()
+        state = {None: True, "files": has_files, "sel": has_sel, "dirty": self.panel.is_dirty(),
+                 "undo": bool(self.undo_stack), "redo": bool(self.redo_stack)}
+        for key, b in list(self.tb_buttons.items()) + list(self._tb_hidden.items()):
+            b.setEnabled(state.get(tbm.ITEMS[key][3], True))
         self.tb_undo.setToolTip(keys(f"되돌리기: {self.undo_stack[-1].label} (⌘Z)") if self.undo_stack
                                 else "되돌릴 작업이 없습니다")
-        self.tb_redo.setEnabled(bool(self.redo_stack))
         self.tb_redo.setToolTip(keys(f"다시 실행: {self.redo_stack[-1].label} (⇧⌘Z)") if self.redo_stack
                                 else "다시 실행할 작업이 없습니다")
-        self.tb_refresh.setEnabled(has_files)
-        self.tb_clear.setEnabled(has_files)
-        has_sel = self.table.selectionModel().hasSelection()
-        self.tb_finder.setEnabled(has_sel)
-        self.tb_up.setEnabled(has_sel)
-        self.tb_down.setEnabled(has_sel)
-        self.tb_number.setEnabled(has_files)
-        self.tb_rename.setEnabled(has_files)
 
     def show_about(self):
         ver = app_version()

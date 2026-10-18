@@ -19,7 +19,11 @@ from .plan import Plan
 from .tasks import run_task
 
 FIELDS = [("title", "제목"), ("artist", "아티스트"), ("album", "앨범"), ("albumartist", "앨범 아티스트"),
-          ("year", "연도"), ("genre", "장르"), ("track", "트랙 번호"), ("disc", "디스크 번호")]
+          ("year", "연도"), ("genre", "장르"), ("track", "트랙 번호"), ("disc", "디스크 번호"),
+          ("composer", "작곡가"), ("COPYRIGHT", "저작권"), ("PUBLISHER", "레이블"), ("ISRC", "ISRC"),
+          ("BARCODE", "바코드 (UPC)"), ("COMPILATION", "컴필레이션"), ("date", "연도에 발매일 전체 (2014-05-16)")]
+# 처음 보는 필드(새로 생긴 것)는 켠 채로 시작한다 — 발매일 전체는 끈 채로
+OFF_BY_DEFAULT = {"date"}
 COVER_SIZES = [600, 1000, 1500, 3000]
 WEAK = QBrush(QColor(205, 120, 0))
 GRAY = QBrush(QColor(140, 140, 140))
@@ -109,8 +113,9 @@ class TagSourceDialog(QDialog):
         head.addWidget(self.album_label, 1)
         rv.addLayout(head)
         self._previews = {}
-        self.table = QTableWidget(len(files), 6)
-        self.table.setHorizontalHeaderLabels(["곡 (지금)", "짝지은 Apple Music 곡", "새 제목", "새 아티스트", "새 번호", "맞음"])
+        self.table = QTableWidget(len(files), 7)
+        self.table.setHorizontalHeaderLabels(["곡 (지금)", "짝지은 Apple Music 곡", "새 제목", "새 아티스트", "새 번호", "맞음",
+                                              "작곡가"])
         self.table.verticalHeader().hide()
         self.table.verticalHeader().setDefaultSectionSize(26)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -121,7 +126,7 @@ class TagSourceDialog(QDialog):
         hh.setSectionsClickable(True)
         hh.sectionClicked.connect(self._header_clicked)
         hh.setSectionResizeMode(QHeaderView.Interactive)
-        for c, w in enumerate((230, 260, 170, 120, 60)):
+        for c, w in enumerate((230, 260, 170, 120, 60, 50)):
             self.table.setColumnWidth(c, w)
         hh.setStretchLastSection(True)
         rv.addWidget(self.table, 1)
@@ -151,29 +156,33 @@ class TagSourceDialog(QDialog):
             b.setAutoDefault(False)
             b.clicked.connect(lambda _=False, on=on: self.check_all(on))
             allrow.addWidget(b)
-        g.addLayout(allrow, 2, 3)
-        saved = settings.value("source/fields", [k for k, _ in FIELDS] + ["cover"])
+        rows = (len(FIELDS) + 3) // 4
+        g.addLayout(allrow, rows, 3)
+        saved = settings.value("source/fields", [k for k, _ in FIELDS if k not in OFF_BY_DEFAULT] + ["cover"])
         if isinstance(saved, str):
             saved = [saved]
+        known = settings.value("source/fields_known", [k for k, _ in FIELDS[:8]] + ["cover"])
+        if isinstance(known, str):
+            known = [known]
         self.checks = {}
         for i, (k, t) in enumerate(FIELDS):
             cb = QCheckBox(t)
-            cb.setChecked(k in saved)
+            cb.setChecked(k in saved or (k not in known and k not in OFF_BY_DEFAULT))
             cb.toggled.connect(self._refresh_rows)
             g.addWidget(cb, i // 4, i % 4)
             self.checks[k] = cb
         self.totals = QCheckBox("총수도 넣기 (3/12)")
         self.totals.setChecked(settings.value("source/totals", True, bool))
         self.totals.toggled.connect(self._refresh_rows)
-        g.addWidget(self.totals, 2, 0)
+        g.addWidget(self.totals, rows, 0)
         self.cover = QCheckBox("커버")
         self.cover.setChecked("cover" in saved)
-        g.addWidget(self.cover, 2, 1)
+        g.addWidget(self.cover, rows, 1)
         self.cover_size = QComboBox()
         for s in COVER_SIZES:
             self.cover_size.addItem(f"{s} × {s}" + (" (가장 큰 크기)" if s == 3000 else ""), s)
         self.cover_size.setCurrentIndex(max(0, self.cover_size.findData(settings.value("source/cover_size", 1000, int))))
-        g.addWidget(self.cover_size, 2, 2)
+        g.addWidget(self.cover_size, rows, 2)
         v.addWidget(box)
 
         self.summary = QLabel()
@@ -254,7 +263,11 @@ class TagSourceDialog(QDialog):
         bits = " · ".join(x for x in (rel.year, rel.genre, f"곡 {len(rel.tracks)}개", ts.SOURCES[rel.source]) if x)
         nocover = (" · 커버 없음" if not rel.artwork else
                    f" · <span style='color:gray'>커버: {rel.artwork_from}</span>" if rel.artwork_from else "")
-        self.album_label.setText(f"<b>{rel.album}</b> — {rel.artist} · {bits}{nocover}")
+        more = " · ".join(x for x in (rel.date, rel.record_label, "컴필레이션" if rel.compilation else "") if x)
+        if rel.details:
+            more = (more + " · " if more else "") + f"<span style='color:#cd7800'>{rel.details}</span>"
+        self.album_label.setText(f"<b>{rel.album}</b> — {rel.artist} · {bits}{nocover}"
+                                 + (f"<br><span style='color:gray'>{more}</span>" if more else ""))
         self._show_preview(rel)
         self._build_combos()
         self.pair_auto()
@@ -290,7 +303,8 @@ class TagSourceDialog(QDialog):
                 return self.scores[i] if t else None
             if t is None:
                 return None
-            return {1: (t.disc, t.num), 4: (t.disc, t.num), 2: t.title.casefold(), 3: t.artist.casefold()}[col]
+            return {1: (t.disc, t.num), 4: (t.disc, t.num), 2: t.title.casefold(), 3: t.artist.casefold(),
+                    6: t.composer.casefold()}[col]
 
         idx = list(range(len(self.files)))
         have = sorted((i for i in idx if key(i) is not None), key=key, reverse=desc)
@@ -393,7 +407,7 @@ class TagSourceDialog(QDialog):
         for i, f in enumerate(self.files):
             j = self.pairs[i] if self.rel else None
             if j is None:
-                cells = ["", "", "", "—"]
+                cells = ["", "", "", "—", ""]
             else:
                 t = self.rel.tracks[j]
                 n_pair += 1
@@ -401,7 +415,7 @@ class TagSourceDialog(QDialog):
                 ch = ts.changes_for(f, self.rel, t, fields, self.totals.isChecked())
                 n_change += bool(ch) or self.cover.isChecked()
                 mark = "겹침" if used[j] > 1 else ("✓" if self.scores[i] >= 0.8 else f"{int(self.scores[i] * 100)}%")
-                cells = [t.title, t.artist, num, mark]
+                cells = [t.title, t.artist, num, mark, t.composer]
             for c, text in enumerate(cells, start=2):
                 it = QTableWidgetItem(text)
                 if j is None:
@@ -429,6 +443,7 @@ class TagSourceDialog(QDialog):
 
     def _remember(self):
         self.settings.setValue("source/fields", sorted(self.fields()) + (["cover"] if self.cover.isChecked() else []))
+        self.settings.setValue("source/fields_known", [k for k, _ in FIELDS] + ["cover"])
         self.settings.setValue("source/totals", self.totals.isChecked())
         self.settings.setValue("source/cover_size", self.cover_size.currentData())
 
