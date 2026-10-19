@@ -77,6 +77,34 @@ if IS_MAC:
         "library_check": ("보관함 점검…", lambda w: w.library_check(), "Music 보관함의 커버 없음 · 갈라진 앨범 · 파일 없음", None),
     })
 
+# 단추 모음 창의 분류 (여기 없는 단추는 '기타'로)
+CATEGORIES = [
+    ("기본", ["save", "undo", "redo", "refresh", "clear", "open", "add_folder", "remove"]),
+    ("목록 · 재생", ["reveal", "play", "up", "down", "filter"]),
+    ("태그 고치기", ["rename", "number", "autonumber", "tag_source", "exttags", "remove_tags"]),
+    ("변환", ["tag2file", "file2tag", "file2file", "text2tag", "tag2tag", "convert"]),
+    ("커버", ["artwork", "match_covers", "resize_covers", "extract"]),
+    ("점검 · 정리", ["compare", "dupes", "albumcheck", "youtube"]),
+    ("액션", ["actions", "quick_action"]),
+    ("내보내기 · 백업", ["export", "playlist", "backups"]),
+    ("Apple Music", ["music_refresh", "music_add", "library_check"]),
+]
+
+
+def categories() -> list:
+    """(분류 이름, [이 OS 에 있는 단추 키]) — 빈 분류는 뺀다."""
+    seen, out = set(), []
+    for name, ks in CATEGORIES:
+        ks = [k for k in ks if k in ITEMS]
+        seen.update(ks)
+        if ks:
+            out.append((name, ks))
+    rest = [k for k in ITEMS if k not in seen]
+    if rest:
+        out.append(("기타", rest))
+    return out
+
+
 DEFAULT = ["save", "undo", "redo", SEP, "refresh", "clear", SEP, "reveal", SEP, "up", "down", "rename", "number"]
 
 
@@ -320,7 +348,7 @@ class Palette(QDialog):
         self.setWindowTitle("도구 막대 사용자화")
         self.setModal(False)
         self.setAcceptDrops(True)
-        self.resize(720, 460)
+        self.resize(720, 620)
         v = QVBoxLayout(self)
         hint = QLabel("원하는 단추를 <b>도구 막대로 끌어다 놓으세요</b>. 도구 막대의 단추를 끌어 순서를 바꾸고, "
                       "도구 막대 밖으로 끌어내면 빠집니다. 단추를 그냥 누르면 맨 끝에 들어갑니다.")
@@ -329,8 +357,16 @@ class Palette(QDialog):
         inner = QWidget()
         g = QGridLayout(inner)
         g.setSpacing(6)
-        for i, key in enumerate(ITEMS):
-            g.addWidget(_PaletteItem(cust, key), i // self.COLUMNS, i % self.COLUMNS)
+        row = 0
+        for name, ks in categories():
+            head = QLabel(f"<b>{name}</b>")
+            head.setContentsMargins(0, 8 if row else 0, 0, 0)
+            g.addWidget(head, row, 0, 1, self.COLUMNS)
+            row += 1
+            for i, key in enumerate(ks):
+                g.addWidget(_PaletteItem(cust, key), row + i // self.COLUMNS, i % self.COLUMNS)
+            row += (len(ks) + self.COLUMNS - 1) // self.COLUMNS
+        g.setRowStretch(row, 1)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(inner)

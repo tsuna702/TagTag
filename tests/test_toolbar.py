@@ -8,7 +8,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from harness import QApplication, check, finish, samples, window  # noqa: E402
 
-from PySide6.QtWidgets import QPushButton  # noqa: E402
+from PySide6.QtWidgets import QLabel, QPushButton  # noqa: E402
 
 from localtag import toolbar as tbm  # noqa: E402
 from localtag.plan import Plan  # noqa: E402
@@ -102,6 +102,13 @@ check(cust.items == ["play", "save", "|", "undo"], f"팔레트 → 도구 막대
 check(slots()[:2] == ["재생", "저장"], f"도구 막대가 바로 바뀜 {slots()}")
 drop_at("play", 0, 10000)  # 도구 막대 안에서 끝으로
 check(cust.items == ["save", "|", "undo", "play"], f"순서 바꾸기 {cust.items}")
+# 단추 모음은 분류별로, 모든 단추가 한 번씩
+keys_in_palette = [b.key for b in cust.palette.findChildren(tbm._PaletteItem) if b.key in tbm.ITEMS]
+check(sorted(keys_in_palette) == sorted(tbm.ITEMS), "모든 단추가 한 번씩")
+names = [n for n, _ in tbm.categories()]
+check(names[:4] == ["기본", "목록 · 재생", "태그 고치기", "변환"] and "기타" not in names, f"분류 {names}")
+heads = [lab.text() for lab in cust.palette.findChildren(QLabel)]
+check(all(f"<b>{n}</b>" in heads for n in names), "분류 제목이 보임")
 # 사용자화하는 동안 단추를 눌러도 기능은 돌지 않음
 from PySide6.QtTest import QTest  # noqa: E402
 
