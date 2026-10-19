@@ -51,28 +51,86 @@ w.tag_source = lambda: called.append("tag_source")
 w.tb_buttons["tag_source"].click()
 check(called == ["tag_source"], "단추 → 기능")
 
-# 사용자화 창: 넣기 · 빼기 · 구분선 정리 · 기본값
-dlg = tbm.ToolbarDialog(w, tbm.load(w.settings))
-check("tag_source" not in [dlg.pool.item(i).data(0x0100) for i in range(dlg.pool.count())], "이미 넣은 단추는 왼쪽에 없음")
-dlg.bar.setCurrentRow(dlg.bar.count() - 1)
-dlg.add_key("play")
-dlg.add_key("play")
-check(dlg.items().count("play") == 1 and dlg.items()[-1] == "play", f"넣기 (겹치지 않게) {dlg.items()}")
-dlg.bar.setCurrentRow(0)
-dlg.remove_selected()
-dlg.bar.setCurrentRow(0)
-dlg.move(1)
-check(dlg.items()[:2] == ["save", "|"], f"빼기 · 순서 바꾸기 {dlg.items()}")
-dlg.add_separator()
-dlg._accept()
-check(dlg.result_items[0] != "|" and "||" not in "".join(dlg.result_items) and dlg.result_items[-1] != "|",
-      f"구분선 정리 {dlg.result_items}")
-dlg2 = tbm.ToolbarDialog(w, ["save"])
-dlg2.set_items(tbm.DEFAULT)
-check(dlg2.items() == tbm.DEFAULT, "기본값으로")
+# 배치 바꾸기 (순수 함수)
+check(tbm.place(["a", "b", "c"], "c", 2, 0) == ["c", "a", "b"], "도구 막대 안에서 앞으로")
+check(tbm.place(["a", "b", "c"], "a", 0, 3) == ["b", "c", "a"], "도구 막대 안에서 끝으로")
+check(tbm.place(["save", "undo"], "play", None, 1) == ["save", "play", "undo"], "팔레트에서 가운데로")
+check(tbm.place(["save", "undo"], "save", None, 2) == ["undo", "save"], "이미 있는 단추는 옮김")
+check(tbm.place(["save", "|"], "|", None, 0) == ["|", "save", "|"], "구분선은 여러 개")
+check(tbm.place(["save"], tbm.DEFAULT_SET, None, 0) == tbm.DEFAULT, "기본 세트")
+check(tbm.tidy(["|", "save", "|", "|", "undo", "|"]) == ["save", "|", "undo"], "구분선 정리")
 
-# 확인 → 저장 · 다시 만들기
-tbm.ToolbarDialog.exec = lambda self: (self.set_items(["save", "|", "play"]), self._accept(), 1)[2]
+# 터치 바처럼: 사용자화 모드에서 실제 도구 막대에 끌어다 놓기
+from PySide6.QtCore import QPoint, QPointF, Qt as _Qt  # noqa: E402
+import warnings  # noqa: E402
+from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent  # noqa: E402
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+w.settings.setValue("toolbar_items", ["save", "|", "undo"])
+w._fill_toolbar()
+w.resize(1400, 600)
+w.show()
 w.customize_toolbar()
-check(w.settings.value("toolbar_items") == ["save", "|", "play"] and shown() == ["저장", "|", "재생"], f"사용자화 적용 {shown()}")
+app.processEvents()
+cust = w._customizer
+check(cust is not None and cust.palette.isVisible(), "팔레트가 뜸")
+check(all(b.isEnabled() for b in w.tb_buttons.values()), "사용자화하는 동안 단추는 모두 켜짐 (끌 수 있게)")
+
+
+def drop_at(key, src, x):
+    """실제로 끌 때처럼 들어옴 → 움직임 → 놓기 (Qt 는 들어옴을 받아 준 곳에만 놓기를 보낸다)."""
+    tb = w.toolbar
+    m = tbm._mime(key, src)
+    y = tb.height() // 2
+    enter = QDragEnterEvent(QPoint(int(x), y), _Qt.MoveAction, m, _Qt.LeftButton, _Qt.NoModifier)
+    app.sendEvent(tb, enter)
+    move = QDragMoveEvent(QPoint(int(x), y), _Qt.MoveAction, m, _Qt.LeftButton, _Qt.NoModifier)
+    app.sendEvent(tb, move)
+    check(enter.isAccepted() and move.isAccepted() and cust.indicator.isVisible(), "끌어 오면 들어갈 자리 표시")
+    app.sendEvent(tb, QDropEvent(QPointF(x, y), _Qt.MoveAction, m, _Qt.LeftButton, _Qt.NoModifier))
+    app.processEvents()
+    app.processEvents()
+
+
+def slots():
+    return [ws.text() if hasattr(ws, "text") else "?" for ws in cust.slot_widgets(w.toolbar)]
+
+
+first = cust.slot_widgets(w.toolbar)[0]
+drop_at("play", None, first.geometry().left() + 1)  # 맨 앞에
+check(cust.items == ["play", "save", "|", "undo"], f"팔레트 → 도구 막대 맨 앞 {cust.items}")
+check(slots()[:2] == ["재생", "저장"], f"도구 막대가 바로 바뀜 {slots()}")
+drop_at("play", 0, 10000)  # 도구 막대 안에서 끝으로
+check(cust.items == ["save", "|", "undo", "play"], f"순서 바꾸기 {cust.items}")
+# 사용자화하는 동안 단추를 눌러도 기능은 돌지 않음
+from PySide6.QtTest import QTest  # noqa: E402
+
+played = []
+w.play = lambda: played.append(1)
+QTest.mouseClick(w.tb_buttons["play"], _Qt.LeftButton)
+check(not played, "사용자화 중에는 단추가 눌리지 않음")
+# 팔레트 단추를 그냥 누르면 맨 끝에
+pal = [b for b in cust.palette.findChildren(tbm._PaletteItem) if b.key == "tag_source"][0]
+QTest.mouseClick(pal, _Qt.LeftButton)
+app.processEvents()
+check(cust.items[-1] == "tag_source", f"팔레트 단추 누르기 → 맨 끝 {cust.items}")
+cust.items = cust.items[:-1]
+cust.rebuild()
+# 도구 막대 밖으로 끌어내기 → 빠짐 (끄는 동작은 흉내)
+tbm._start_drag = lambda source, key, src=None: _Qt.IgnoreAction
+cust.drag_from_bar(cust.slot_widgets(w.toolbar)[0], 0)
+app.processEvents()
+check(cust.items == ["|", "undo", "play"], f"밖으로 끌어내면 빠짐 {cust.items}")
+# 단추를 눌러도 동작하지 않음 (사용자화 중)
+cust.finish(save=True)
+app.processEvents()
+check(w._customizer is None and w.settings.value("toolbar_items") == ["undo", "play"], f"완료 → 정리해 저장 {w.settings.value('toolbar_items')}")
+check(shown() == ["되돌리기", "재생"], f"보통 도구 막대로 {shown()}")
+
+# 취소하면 원래대로
+w.customize_toolbar()
+w._customizer.items = ["save"]
+w._customizer.rebuild()
+w._customizer.finish(save=False)
+check(w.settings.value("toolbar_items") == ["undo", "play"] and shown() == ["되돌리기", "재생"], "취소 → 그대로")
 finish()

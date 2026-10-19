@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from PySide6.QtCore import QEvent, QItemSelection, QItemSelectionModel, QSettings, QStandardPaths, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QComboBox, QFileDialog, QHeaderView, QLabel, QLineEdit, QMainWindow,
+    QAbstractItemView, QApplication, QComboBox, QFileDialog, QHeaderView, QLabel, QLineEdit, QMainWindow, QSizePolicy,
     QHBoxLayout, QMenu, QMessageBox, QProgressDialog, QPushButton, QScrollArea, QSplitter, QTableView,
     QToolBar, QToolButton, QVBoxLayout, QWidget,
 )
@@ -406,10 +406,11 @@ class MainWindow(QMainWindow):
     def _build_toolbar(self):
         self.toolbar = None
         self._tb_hidden = {}
+        self._customizer = None
         self._fill_toolbar()
 
-    def _fill_toolbar(self):
-        """설정에 저장한 단추·순서로 도구 막대를 (다시) 만든다 (설정 → 도구 막대 사용자화)."""
+    def _fill_toolbar(self, items=None):
+        """설정에 저장한 단추·순서로 도구 막대를 (다시) 만든다. items 를 주면 그 배치로 (사용자화하는 동안)."""
         from . import toolbar as tbm
         if self.toolbar is not None:
             self.removeToolBar(self.toolbar)
@@ -431,10 +432,20 @@ class MainWindow(QMainWindow):
             b.clicked.connect(lambda _=False, fn=fn: fn(self))
             return b
 
+        customizing = self._customizer is not None
         self.tb_buttons = {}
-        for key in tbm.load(self.settings):
-            if key == tbm.SEP:
+        for key in (items if items is not None else tbm.load(self.settings)):
+            if key == tbm.SEP and not customizing:
                 tb.addSeparator()
+            elif key in (tbm.SEP, tbm.SPACE):
+                w = QLabel("│" if key == tbm.SEP else "↔ 공간 ↔" if customizing else "")
+                w.setAlignment(Qt.AlignCenter)
+                if key == tbm.SPACE:
+                    w.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+                if customizing:  # 끌어 옮길 수 있게 잡을 곳을 보여 준다
+                    w.setMinimumWidth(18 if key == tbm.SEP else 70)
+                    w.setStyleSheet("color: gray; border: 1px dashed gray; border-radius: 4px; padding: 2px;")
+                tb.addWidget(w)
             else:
                 self.tb_buttons[key] = button(key)
                 tb.addWidget(self.tb_buttons[key])
@@ -446,6 +457,8 @@ class MainWindow(QMainWindow):
                 self._tb_hidden[attr] = b
             setattr(self, "tb_" + ("finder" if attr == "reveal" else attr), b)
         self._update_toolbar()
+        if customizing:
+            self._customizer.attach(tb)
 
     def _toolbar_menu(self, pos):
         menu = QMenu(self)
@@ -453,11 +466,12 @@ class MainWindow(QMainWindow):
         menu.exec(self.toolbar.mapToGlobal(pos))
 
     def customize_toolbar(self):
+        """터치 바 사용자화처럼: 단추 모음에서 도구 막대로 끌어다 놓기 (완료할 때 저장)."""
         from . import toolbar as tbm
-        dlg = tbm.ToolbarDialog(self, tbm.load(self.settings))
-        if dlg.exec():
-            self.settings.setValue("toolbar_items", dlg.result_items)
-            self._fill_toolbar()
+        if self._customizer is not None:
+            self._customizer.palette.raise_()
+            return
+        tbm.Customizer(self).start()
 
     def _update_toolbar(self):
         if not hasattr(self, "tb_buttons"):
@@ -468,7 +482,8 @@ class MainWindow(QMainWindow):
         state = {None: True, "files": has_files, "sel": has_sel, "dirty": self.panel.is_dirty(),
                  "undo": bool(self.undo_stack), "redo": bool(self.redo_stack)}
         for key, b in list(self.tb_buttons.items()) + list(self._tb_hidden.items()):
-            b.setEnabled(state.get(tbm.ITEMS[key][3], True))
+            # 사용자화하는 동안은 모두 켜 둔다 (꺼진 단추는 끌 수 없다)
+            b.setEnabled(self._customizer is not None or state.get(tbm.ITEMS[key][3], True))
         self.tb_undo.setToolTip(keys(f"되돌리기: {self.undo_stack[-1].label} (⌘Z)") if self.undo_stack
                                 else "되돌릴 작업이 없습니다")
         self.tb_redo.setToolTip(keys(f"다시 실행: {self.redo_stack[-1].label} (⇧⌘Z)") if self.redo_stack

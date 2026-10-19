@@ -1,19 +1,24 @@
-"""도구 막대 사용자화 — 넣을 단추와 순서를 사용자가 고른다 (Mac 터치 바 사용자화처럼 끌어다 놓기).
+"""도구 막대 사용자화 — macOS 터치 바·Finder 도구 막대 사용자화처럼 단추 모음(팔레트)에서
+실제 도구 막대 위로 끌어다 놓아 넣고, 도구 막대 안에서 끌어 순서를 바꾸고, 밖으로 끌어내 뺀다.
 
 단추 목록(ITEMS)과 기본 배치(DEFAULT)만 여기 있고, 실제 동작은 MainWindow 의 메서드를 부른다.
-설정 `toolbar_items` 에 키 목록으로 저장한다 ('|' 는 구분선).
+설정 `toolbar_items` 에 키 목록으로 저장한다 ('|' 구분선, '~' 늘어나는 공간).
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, QMimeData, QObject, QPoint, Qt, QTimer
+from PySide6.QtGui import QDrag
 from PySide6.QtWidgets import (
-    QAbstractItemView, QDialog, QDialogButtonBox, QGridLayout, QLabel, QListWidget, QListWidgetItem, QPushButton,
-    QVBoxLayout,
+    QApplication, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea, QSizePolicy,
+    QVBoxLayout, QWidget,
 )
 
 from .osutil import IS_MAC, REVEAL_LABEL, keys
 
 SEP = "|"
+SPACE = "~"  # 늘어나는 공간 (뒤의 단추를 오른쪽 끝으로 민다)
+DEFAULT_SET = "@default"  # 팔레트의 '기본 세트' — 놓으면 전부 기본 배치로
+MIME = "application/x-localtag-toolbar"
 
 
 def _conv(i):
@@ -81,162 +86,282 @@ def load(settings) -> list[str]:
         return list(DEFAULT)
     if isinstance(v, str):
         v = [v] if v else []
-    return [k for k in v if k == SEP or k in ITEMS]
+    return [k for k in v if k in (SEP, SPACE) or k in ITEMS]
 
 
 def label_of(key: str) -> str:
-    return "──── 구분선 ────" if key == SEP else ITEMS[key][0]
+    return {SEP: "구분선", SPACE: "늘어나는 공간", DEFAULT_SET: "기본 세트"}.get(key) or ITEMS[key][0]
 
 
-class ToolbarDialog(QDialog):
-    """결과: self.items (키 목록)"""
+# ------------------------------------------------------------------ 배치 바꾸기 (순수 함수)
 
-    def __init__(self, parent, current: list[str]):
-        super().__init__(parent)
+def place(items, key, src, dst) -> list:
+    """key 를 dst 자리(그 앞)에 넣는다. src 는 도구 막대 안에서 옮길 때의 원래 자리 (팔레트에서 오면 None).
+    같은 단추가 이미 있으면 옮긴다 (구분선·공간은 여러 개 둘 수 있다)."""
+    items = list(items)
+    if key == DEFAULT_SET:
+        return list(DEFAULT)
+    if src is not None and 0 <= src < len(items):
+        key = items.pop(src)
+        if dst > src:
+            dst -= 1
+    elif key not in (SEP, SPACE) and key in items:
+        i = items.index(key)
+        items.pop(i)
+        if dst > i:
+            dst -= 1
+    items.insert(max(0, min(dst, len(items))), key)
+    return items
+
+
+def tidy(items) -> list:
+    """앞뒤·연달아 있는 구분선을 정리한다."""
+    out = []
+    for k in items:
+        if k == SEP and (not out or out[-1] == SEP):
+            continue
+        out.append(k)
+    while out and out[-1] == SEP:
+        out.pop()
+    return out
+
+
+def _mime(key, src=None) -> QMimeData:
+    m = QMimeData()
+    m.setData(MIME, f"{key}\n{'' if src is None else src}".encode())
+    return m
+
+
+def _read(mime):
+    if not mime.hasFormat(MIME):
+        return None
+    key, _, src = bytes(mime.data(MIME)).decode().partition("\n")
+    return key, (int(src) if src else None)
+
+
+def _start_drag(source, key, src=None):
+    drag = QDrag(source)
+    drag.setMimeData(_mime(key, src))
+    pm = source.grab()
+    drag.setPixmap(pm)
+    drag.setHotSpot(QPoint(pm.width() // 2, pm.height() // 2))
+    return drag.exec(Qt.MoveAction | Qt.CopyAction, Qt.MoveAction)
+
+
+
+
+class Customizer(QObject):
+    """사용자화 모드: 팔레트 창을 띄우고, 도구 막대를 끌어다 놓기 받는 상태로 바꾼다."""
+
+    def __init__(self, win):
+        super().__init__(win)
+        self.win = win
+        self.orig = load(win.settings)
+        self.items = list(self.orig)
+        self.handled = False
+        self.press = None
+        self.indicator = None
+        self.palette = Palette(self)
+
+    # ---- 시작 · 끝
+    def start(self):
+        self.win._customizer = self
+        self.win._fill_toolbar(self.items)
+        tb = self.win.toolbar
+        self.palette.show()
+        g = tb.mapToGlobal(QPoint(0, tb.height()))
+        self.palette.move(g.x() + 40, g.y() + 20)
+        self.palette.raise_()
+
+    def finish(self, save=True):
+        if self.win._customizer is not self:
+            return
+        self.win._customizer = None
+        if save:
+            self.win.settings.setValue("toolbar_items", tidy(self.items))
+        self.win._fill_toolbar()
+        self.palette.hide()
+        self.palette.deleteLater()
+
+    def rebuild(self):
+        if self.win._customizer is self:
+            self.win._fill_toolbar(self.items)
+
+    # ---- 도구 막대
+    def attach(self, tb):
+        """새로 만든 도구 막대를 끌어다 놓기 받게 한다 (단추 누르기는 막고 끌기로)."""
+        tb.setAcceptDrops(True)
+        tb.installEventFilter(self)
+        self.indicator = QFrame(tb)
+        self.indicator.setFixedWidth(3)
+        self.indicator.setStyleSheet("background: palette(highlight); border-radius: 1px;")
+        self.indicator.hide()
+        for i, w in enumerate(self.slot_widgets(tb)):
+            w.setProperty("tb_index", i)
+            w.installEventFilter(self)
+
+    def slot_widgets(self, tb):
+        return [tb.widgetForAction(a) for a in tb.actions() if tb.widgetForAction(a) is not None]
+
+    def index_at(self, x) -> int:
+        """도구 막대의 x 위치 → 넣을 자리 (보이는 칸의 가운데를 기준으로)."""
+        ws = self.slot_widgets(self.win.toolbar)
+        for i, w in enumerate(ws):
+            if w.isVisible() and x < w.geometry().center().x():
+                return i
+        return len(ws)
+
+    def _show_indicator(self, i):
+        tb = self.win.toolbar
+        ws = self.slot_widgets(tb)
+        if i < len(ws) and ws[i].isVisible():
+            x = ws[i].geometry().left() - 3
+        elif ws:
+            x = max((w.geometry().right() for w in ws if w.isVisible()), default=4) + 2
+        else:
+            x = 4
+        self.indicator.setGeometry(max(0, x), 4, 3, max(8, tb.height() - 8))
+        self.indicator.show()
+        self.indicator.raise_()
+
+    def eventFilter(self, obj, ev):
+        t = ev.type()
+        tb = self.win.toolbar
+        if obj is tb:
+            if t in (QEvent.DragEnter, QEvent.DragMove) and _read(ev.mimeData()):
+                ev.setDropAction(Qt.MoveAction)
+                ev.accept()
+                self._show_indicator(self.index_at(ev.position().toPoint().x()))
+                return True
+            if t == QEvent.DragLeave:
+                if self.indicator:
+                    self.indicator.hide()
+                return True
+            if t == QEvent.Drop and _read(ev.mimeData()):
+                key, src = _read(ev.mimeData())
+                self.items = place(self.items, key, src, self.index_at(ev.position().toPoint().x()))
+                self.handled = True
+                ev.setDropAction(Qt.MoveAction)
+                ev.accept()
+                if self.indicator:
+                    self.indicator.hide()
+                QTimer.singleShot(0, self.rebuild)  # 끄는 중인 단추를 지금 지우지 않게
+                return True
+            return False
+        idx = obj.property("tb_index") if isinstance(obj, QWidget) else None
+        if idx is None:
+            return False
+        if t == QEvent.MouseButtonPress and ev.button() == Qt.LeftButton:
+            self.press = (obj, ev.position().toPoint())
+            return True
+        if t == QEvent.MouseMove and self.press and self.press[0] is obj:
+            if (ev.position().toPoint() - self.press[1]).manhattanLength() >= QApplication.startDragDistance():
+                self.press = None
+                self.drag_from_bar(obj, int(idx))
+            return True
+        if t in (QEvent.MouseButtonRelease, QEvent.MouseButtonDblClick):
+            self.press = None
+            return True  # 사용자화하는 동안 단추는 눌리지 않는다
+        return False
+
+    def drag_from_bar(self, widget, idx):
+        if not 0 <= idx < len(self.items):
+            return
+        self.handled = False
+        _start_drag(widget, self.items[idx], idx)
+        if not self.handled:  # 도구 막대 밖(팔레트 포함)에 놓음 → 뺀다
+            self.items = self.items[:idx] + self.items[idx + 1:]
+        QTimer.singleShot(0, self.rebuild)
+
+
+class _PaletteItem(QPushButton):
+    """팔레트의 단추 — 누르면 맨 끝에 넣고, 끌면 원하는 자리에."""
+
+    def __init__(self, cust, key):
+        super().__init__(label_of(key))
+        self.cust, self.key = cust, key
+        self.setFocusPolicy(Qt.NoFocus)
+        self.setToolTip(ITEMS[key][2] if key in ITEMS else {
+            SEP: "단추 사이에 세로선", SPACE: "뒤의 단추를 오른쪽 끝으로 미는 빈칸",
+            DEFAULT_SET: "도구 막대에 놓으면 처음 배치로 돌아갑니다"}[key])
+        self._press = None
+
+    def mousePressEvent(self, e):
+        self._press = e.position().toPoint()
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if self._press is not None and (e.position().toPoint() - self._press).manhattanLength() >= \
+                QApplication.startDragDistance():
+            self._press = None
+            self.setDown(False)
+            _start_drag(self, self.key)
+            return
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        clicked = self._press is not None and self.rect().contains(e.position().toPoint())
+        self._press = None
+        super().mouseReleaseEvent(e)
+        if clicked:  # 그냥 누르면 맨 끝에
+            c = self.cust
+            c.items = place(c.items, self.key, None, len(c.items))
+            c.rebuild()
+
+
+class Palette(QDialog):
+    """단추 모음. 도구 막대에서 끌어와 여기에 놓아도 빠진다."""
+
+    COLUMNS = 4
+
+    def __init__(self, cust):
+        super().__init__(cust.win)
+        self.cust = cust
         self.setWindowTitle("도구 막대 사용자화")
-        self.resize(640, 520)
+        self.setModal(False)
+        self.setAcceptDrops(True)
+        self.resize(720, 460)
         v = QVBoxLayout(self)
-        hint = QLabel("왼쪽 단추를 오른쪽으로 끌어다 놓거나 더블클릭해 넣고, 오른쪽에서 끌어 순서를 바꿉니다. "
-                      "오른쪽에서 더블클릭하거나 왼쪽으로 끌어내면 뺍니다.")
+        hint = QLabel("원하는 단추를 <b>도구 막대로 끌어다 놓으세요</b>. 도구 막대의 단추를 끌어 순서를 바꾸고, "
+                      "도구 막대 밖으로 끌어내면 빠집니다. 단추를 그냥 누르면 맨 끝에 들어갑니다.")
         hint.setWordWrap(True)
         v.addWidget(hint)
-        g = QGridLayout()
-        g.addWidget(QLabel("넣을 수 있는 단추"), 0, 0)
-        g.addWidget(QLabel("도구 막대 (위에서부터 왼쪽 → 오른쪽)"), 0, 2)
-        self.pool = _List(self, source=True)
-        self.bar = _List(self, source=False)
-        g.addWidget(self.pool, 1, 0)
-        mid = QVBoxLayout()
-        mid.addStretch(1)
-        for text, slot in (("넣기 →", self.add_selected), ("← 빼기", self.remove_selected),
-                           ("구분선 넣기", self.add_separator), ("위로", lambda: self.move(-1)),
-                           ("아래로", lambda: self.move(1))):
-            b = QPushButton(text)
-            b.setAutoDefault(False)
-            b.clicked.connect(slot)
-            mid.addWidget(b)
-        mid.addStretch(1)
-        g.addLayout(mid, 1, 1)
-        g.addWidget(self.bar, 1, 2)
-        g.setColumnStretch(0, 1)
-        g.setColumnStretch(2, 1)
-        v.addLayout(g, 1)
-        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel | QDialogButtonBox.RestoreDefaults)
-        bb.button(QDialogButtonBox.Ok).setText("확인")
-        bb.button(QDialogButtonBox.Cancel).setText("취소")
-        bb.button(QDialogButtonBox.RestoreDefaults).setText("기본값으로")
-        bb.button(QDialogButtonBox.RestoreDefaults).clicked.connect(lambda: self.set_items(DEFAULT))
-        bb.accepted.connect(self._accept)
-        bb.rejected.connect(self.reject)
-        v.addWidget(bb)
-        self.pool.itemDoubleClicked.connect(lambda it: self.add_key(it.data(Qt.UserRole)))
-        self.bar.itemDoubleClicked.connect(lambda it: self._take(self.bar.row(it)))
-        self.set_items(current)
+        inner = QWidget()
+        g = QGridLayout(inner)
+        g.setSpacing(6)
+        for i, key in enumerate(ITEMS):
+            g.addWidget(_PaletteItem(cust, key), i // self.COLUMNS, i % self.COLUMNS)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(inner)
+        v.addWidget(scroll, 1)
+        extra = QHBoxLayout()
+        for key in (SEP, SPACE):
+            extra.addWidget(_PaletteItem(cust, key))
+        extra.addStretch(1)
+        extra.addWidget(QLabel("…또는 기본 세트를 끌어다 놓기:"))
+        extra.addWidget(_PaletteItem(cust, DEFAULT_SET))
+        v.addLayout(extra)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        cancel = QPushButton("취소")
+        cancel.setAutoDefault(False)
+        cancel.clicked.connect(lambda: cust.finish(save=False))
+        done = QPushButton("완료")
+        done.setDefault(True)
+        done.clicked.connect(lambda: cust.finish(save=True))
+        row.addWidget(cancel)
+        row.addWidget(done)
+        v.addLayout(row)
 
-    # ---- 목록
-    def _item(self, key):
-        it = QListWidgetItem(label_of(key))
-        it.setData(Qt.UserRole, key)
-        if key != SEP:
-            it.setToolTip(ITEMS[key][2])
-        return it
-
-    def set_items(self, keys_):
-        self.bar.clear()
-        for k in keys_:
-            self.bar.addItem(self._item(k))
-        self._refresh_pool()
-
-    def items(self) -> list[str]:
-        return [self.bar.item(i).data(Qt.UserRole) for i in range(self.bar.count())]
-
-    def _refresh_pool(self):
-        used = set(self.items())
-        self.pool.clear()
-        for k in ITEMS:
-            if k not in used:
-                self.pool.addItem(self._item(k))
-
-    def add_key(self, key, row=None):
-        if key != SEP and key in self.items():
-            return
-        cur = self.bar.currentRow()
-        row = row if row is not None else (cur + 1 if cur >= 0 else self.bar.count())
-        self.bar.insertItem(row, self._item(key))
-        self.bar.setCurrentRow(row)
-        self._refresh_pool()
-
-    def add_selected(self):
-        for it in self.pool.selectedItems():
-            self.add_key(it.data(Qt.UserRole))
-
-    def add_separator(self):
-        self.add_key(SEP)
-
-    def _take(self, row):
-        if 0 <= row < self.bar.count():
-            self.bar.takeItem(row)
-            self._refresh_pool()
-
-    def remove_selected(self):
-        for it in self.bar.selectedItems():
-            self._take(self.bar.row(it))
-
-    def move(self, step):
-        row = self.bar.currentRow()
-        to = row + step
-        if row < 0 or not 0 <= to < self.bar.count():
-            return
-        it = self.bar.takeItem(row)
-        self.bar.insertItem(to, it)
-        self.bar.setCurrentRow(to)
-
-    def _accept(self):
-        # 앞뒤·연달아 있는 구분선은 정리한다
-        out = []
-        for k in self.items():
-            if k == SEP and (not out or out[-1] == SEP):
-                continue
-            out.append(k)
-        while out and out[-1] == SEP:
-            out.pop()
-        self.result_items = out
-        self.accept()
-
-
-class _List(QListWidget):
-    """끌어다 놓기: 왼쪽(source) ↔ 오른쪽(도구 막대). 오른쪽 안에서는 순서 바꾸기."""
-
-    def __init__(self, dlg, source):
-        super().__init__()
-        self.dlg, self.source = dlg, source
-        self.setSelectionMode(QAbstractItemView.ExtendedSelection if source else QAbstractItemView.SingleSelection)
-        self.setDragEnabled(True)
-        self.setAcceptDrops(True)
-        self.setDropIndicatorShown(True)
-        self.setDragDropMode(QAbstractItemView.DragDrop)
-        self.setDefaultDropAction(Qt.MoveAction)
+    def dragEnterEvent(self, e):
+        r = _read(e.mimeData())
+        if r and r[1] is not None:  # 도구 막대에서 끌어온 것만 (빼기)
+            e.acceptProposedAction()
 
     def dropEvent(self, e):
-        src = e.source()
-        e.setDropAction(Qt.IgnoreAction)  # 목록은 직접 고친다 (Qt 의 기본 복사·이동은 쓰지 않음)
-        e.accept()
-        if not isinstance(src, _List):
-            return
-        d = self.dlg
-        if self.source:  # 도구 막대 → 왼쪽: 빼기
-            if src is d.bar:
-                d.remove_selected()
-            return
-        idx = self.indexAt(e.position().toPoint())
-        row = idx.row() if idx.isValid() else self.count()
-        if src is d.pool:
-            for i, it in enumerate(src.selectedItems()):
-                d.add_key(it.data(Qt.UserRole), row + i)
-        elif src is self:  # 순서 바꾸기
-            cur = self.currentRow()
-            if cur < 0 or row in (cur, cur + 1):
-                return
-            it = self.takeItem(cur)
-            self.insertItem(row - 1 if row > cur else row, it)
-            self.setCurrentRow(row - 1 if row > cur else row)
+        e.acceptProposedAction()  # 빼기는 끈 쪽(drag_from_bar)이 한다
+
+    def closeEvent(self, e):
+        self.cust.finish(save=True)  # 창을 닫으면 '완료'와 같다
+        super().closeEvent(e)
