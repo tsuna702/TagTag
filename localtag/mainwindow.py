@@ -2076,8 +2076,24 @@ class App(QApplication):
             self.window.load_paths(paths, replace=False)
 
 
+# 글자 변환표는 처음 쓸 때 앱 안의 압축 파일에서 읽는다. 앱이 켜진 채로 새로 빌드되면 그 파일이 바뀌어
+# 'unknown encoding: utf-16-le' 로 저장이 실패하므로 (1.1.5) 켤 때 미리 읽어 둔다.
+ENCODINGS = ("utf-8", "utf-8-sig", "utf-16", "utf-16-le", "utf-16-be", "latin-1", "ascii", "cp949", "euc-kr",
+             "cp932", "shift_jis", "cp1252", "idna", "mbcs")
+
+
+def _preload_codecs():
+    import codecs
+    for name in ENCODINGS:
+        try:
+            codecs.lookup(name)
+        except LookupError:
+            pass  # mbcs 는 Windows 에만
+
+
 def main(argv=None):
     import sys
+    _preload_codecs()
     argv = argv if argv is not None else sys.argv
     app = App(argv)
     app.setApplicationName(APP_NAME)
