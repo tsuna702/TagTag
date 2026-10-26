@@ -19,8 +19,8 @@ from datetime import datetime
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton,
-    QTableWidget, QTableWidgetItem, QVBoxLayout,
+    QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QGroupBox, QHBoxLayout, QHeaderView, QLabel,
+    QLineEdit, QMessageBox, QPushButton, QRadioButton, QTableWidget, QTableWidgetItem, QVBoxLayout,
 )
 
 from . import artwork as art
@@ -33,7 +33,8 @@ LEAST = 0.6   # 이보다 낮으면 짝짓지 않는다
 WEAK = QBrush(QColor(205, 120, 0))
 GRAY = QBrush(QColor(140, 140, 140))
 TOTALS = {"total": "3/42 (전체 곡 수까지)", "plain": "3"}
-DISCS = {"keep": "그대로 두기", "year": "연도마다 1, 2, 3…", "clear": "지우기"}
+MODES = {"all": "① 한 줄로 이어서 — 모든 곡에 트랙 번호 1, 2, 3 … 끝까지",
+         "year": "② 연도마다 디스크 — 2018 → 디스크 1, 2019 → 디스크 2 … 그 안에서 트랙 번호 1, 2, 3 …"}
 UNDATED = {"keep": "번호 그대로 두기", "end": "맨 뒤에 (지금 순서대로)"}
 
 
@@ -291,7 +292,7 @@ COLS = ["곡", "짝지은 영상", "확신", "업로드 (직접 입력 가능)",
 class YtOrderDialog(QDialog):
     """결과: self.plans"""
 
-    def __init__(self, parent, files, settings):
+    def __init__(self, parent, files, settings, mode=None):
         super().__init__(parent)
         self.files = sorted(files, key=_current_key)
         self.settings = settings
@@ -327,9 +328,34 @@ class YtOrderDialog(QDialog):
         hint.setStyleSheet("color: gray;")
         v.addWidget(hint)
 
+        if mode is None:  # 1.1.4 의 '디스크: 연도마다' 설정을 이어받는다
+            old = settings.value("ytorder/disc", "", str)
+            mode = settings.value("ytorder/mode", "year" if old == "year" else "all", str)
+        box = QGroupBox("번호 매기는 방식")
+        bv = QVBoxLayout(box)
+        self.modes = QButtonGroup(self)
+        for k, text in MODES.items():
+            rb = QRadioButton(text)
+            rb.setProperty("mode", k)
+            rb.setChecked(k == mode)
+            self.modes.addButton(rb)
+            bv.addWidget(rb)
+            if k == "all":
+                self.clear_disc = QCheckBox("디스크 번호는 지우기 (연도마다 나눠 두었던 디스크 번호 등)")
+                self.clear_disc.setChecked(settings.value("ytorder/clear_disc", True, bool))
+                self.clear_disc.toggled.connect(lambda on: (settings.setValue("ytorder/clear_disc", on), self.recompute()))
+                indent = QHBoxLayout()
+                indent.addSpacing(24)
+                indent.addWidget(self.clear_disc)
+                indent.addStretch(1)
+                bv.addLayout(indent)
+        if not self.modes.checkedButton():
+            self.modes.buttons()[0].setChecked(True)
+        self.modes.buttonToggled.connect(self._mode_changed)
+        v.addWidget(box)
+
         opts = QHBoxLayout()
         self.total = self._combo(opts, "트랙 번호:", TOTALS, "ytorder/total", "total")
-        self.disc = self._combo(opts, "디스크:", DISCS, "ytorder/disc", "keep")
         self.undated = self._combo(opts, "날짜 없는 곡:", UNDATED, "ytorder/undated", "keep")
         self.year = QComboBox()
         self.year.addItem("연도: 그대로", False)
@@ -365,7 +391,22 @@ class YtOrderDialog(QDialog):
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
         v.addWidget(bb)
+        self._mode_changed()
         self.fill()
+
+    def mode(self) -> str:
+        return self.modes.checkedButton().property("mode")
+
+    def _mode_changed(self, *_):
+        self.settings.setValue("ytorder/mode", self.mode())
+        self.clear_disc.setEnabled(self.mode() == "all")
+        self.setWindowTitle("YouTube 업로드 순서로 번호 매기기 — " + ("한 줄로 이어서" if self.mode() == "all" else "연도마다 디스크"))
+        self.recompute()
+
+    def disc_rule(self) -> str:
+        if self.mode() == "year":
+            return "year"
+        return "clear" if self.clear_disc.isChecked() else "keep"
 
     def _combo(self, row, label, choices, key, default):
         row.addWidget(QLabel(label))
@@ -505,10 +546,10 @@ class YtOrderDialog(QDialog):
 
     def result(self):
         return assign(self.files, [self.date_of(i) for i in range(len(self.files))],
-                      self.total.currentData(), self.disc.currentData(), self.undated.currentData())
+                      self.total.currentData(), self.disc_rule(), self.undated.currentData())
 
     def recompute(self):
-        if self._filling:
+        if self._filling or not hasattr(self, "status") or self.table.rowCount() != len(self.rows):
             return
         self._filling = True
         res = self.result()

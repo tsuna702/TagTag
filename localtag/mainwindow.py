@@ -349,7 +349,9 @@ class MainWindow(QMainWindow):
         self._act(m, "YouTube 제목 정리…", self.youtube_clean, "Alt+8")
         m.addSeparator()
         self._act(m, "자동 번호 매기기…", lambda: self.run_converter(AutoNumber), "Ctrl+K")
-        self._act(m, "YouTube 업로드 순서로 번호 매기기…", self.youtube_number)
+        sub = m.addMenu("YouTube 업로드 순서로 번호 매기기")
+        sub.addAction("① 한 줄로 이어서 트랙 번호…", lambda: self.youtube_number("all"))
+        sub.addAction("② 연도마다 디스크, 그 안에서 트랙 번호…", lambda: self.youtube_number("year"))
 
         m = mb.addMenu("설정")
         sub = m.addMenu("ID3 버전")
@@ -557,7 +559,9 @@ class MainWindow(QMainWindow):
         act.addAction("빠른 액션…", self.quick_action)
         act.addAction("YouTube 제목 정리…", self.youtube_clean)
         act.addAction("자동 번호 매기기…", lambda: self.run_converter(AutoNumber))
-        act.addAction("YouTube 업로드 순서로 번호 매기기…", self.youtube_number)
+        yt = act.addMenu("YouTube 업로드 순서로 번호 매기기")
+        yt.addAction("① 한 줄로 이어서 트랙 번호…", lambda: self.youtube_number("all"))
+        yt.addAction("② 연도마다 디스크, 그 안에서 트랙 번호…", lambda: self.youtube_number("year"))
         m.addSeparator()
         m.addAction("목록에서 제거", self.remove_from_list)
         m.addAction("태그 제거…", self.remove_tags)
@@ -644,14 +648,15 @@ class MainWindow(QMainWindow):
             self._take_order(dlg)
             self.apply_plans(dlg.result_plans(), "자동 번호 매기기")
 
-    def youtube_number(self):
-        """YouTube 채널·재생목록의 업로드 날짜 순서대로 트랙 번호 (선택한 곡, 선택이 없으면 보이는 곡 전체)."""
+    def youtube_number(self, mode=None):
+        """YouTube 채널·재생목록의 업로드 날짜 순서대로 트랙 번호 (선택한 곡, 선택이 없으면 보이는 곡 전체).
+        mode: 'all' 한 줄로 이어서 · 'year' 연도마다 디스크 (창에서도 바꿀 수 있다)"""
         self._confirm_pending()
         files = self.selected_files() or self.visible_files()
         if not files:
             return
         from .ytorder import YtOrderDialog
-        dlg = YtOrderDialog(self, files, self.settings)
+        dlg = YtOrderDialog(self, files, self.settings, mode)
         if dlg.exec() and dlg.plans:
             self.apply_plans(dlg.plans, "YouTube 업로드 순서로 번호")
 

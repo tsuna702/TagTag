@@ -46,8 +46,12 @@ ITEMS = {
                "목록에 보이는 순서대로 트랙 번호 매기기 — 선택한 곡, 선택이 없으면 목록 전체", "files"),
     "autonumber": ("자동 번호…", lambda w: w.run_converter(
         __import__("localtag.converters", fromlist=["AutoNumber"]).AutoNumber), keys("자동 번호 매기기 (⌘K)"), "sel"),
-    "yt_number": ("업로드 순서 번호…", lambda w: w.youtube_number(),
-                  "YouTube 채널·재생목록에 올라온 날짜 순서대로 트랙 번호 매기기 — 선택한 곡, 선택이 없으면 목록 전체", "files"),
+    "yt_number": ("업로드 순서 번호…", lambda w: w.youtube_number("all"),
+                  "YouTube 채널·재생목록에 올라온 순서대로 한 줄로 이어서 트랙 번호 1, 2, 3 … — 선택한 곡, 선택이 없으면 목록 전체",
+                  "files"),
+    "yt_number_year": ("연도별 디스크 번호…", lambda w: w.youtube_number("year"),
+                       "YouTube 에 올라온 연도마다 디스크 번호(2018 → 1, 2019 → 2 …)를 매기고 그 안에서 올라온 순서대로 트랙 번호",
+                       "files"),
     "tag2file": ("태그 → 파일명", _conv(0), keys("태그로 파일명 만들기 (⌥1)"), "sel"),
     "file2tag": ("파일명 → 태그", _conv(1), keys("파일명에서 태그 읽기 (⌥2)"), "sel"),
     "file2file": ("파일명 → 파일명", _conv(2), keys("파일명 고치기 (⌥3)"), "sel"),
@@ -83,7 +87,7 @@ if IS_MAC:
 CATEGORIES = [
     ("기본", ["save", "undo", "redo", "refresh", "clear", "open", "add_folder", "remove"]),
     ("목록 · 재생", ["reveal", "play", "up", "down", "filter"]),
-    ("태그 고치기", ["rename", "number", "autonumber", "yt_number", "tag_source", "exttags", "remove_tags"]),
+    ("태그 고치기", ["rename", "number", "autonumber", "yt_number", "yt_number_year", "tag_source", "exttags", "remove_tags"]),
     ("변환", ["tag2file", "file2tag", "file2file", "text2tag", "tag2tag", "convert"]),
     ("커버", ["artwork", "match_covers", "resize_covers", "extract"]),
     ("점검 · 정리", ["compare", "dupes", "albumcheck", "youtube"]),

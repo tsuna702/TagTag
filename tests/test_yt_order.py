@@ -89,8 +89,7 @@ def fake_info(vid):
 
 
 yo.video_info = fake_info
-w.settings.setValue("ytorder/disc", "year")
-dlg = yo.YtOrderDialog(w, list(w.model.files), w.settings)
+dlg = yo.YtOrderDialog(w, list(w.model.files), w.settings, "year")
 
 
 def wait():
@@ -114,6 +113,23 @@ res = {dlg.files[i].ext: r for i, r in enumerate(dlg.result())}
 check(res == {".ogg": ("1/3", "1/1"), ".m4a": ("2/3", "1/2"), ".flac": ("2/3", "2/2"), ".mp3": ("3/3", "1/1")},
       f"업로드 순서 · 연도마다 디스크 {res}")
 check([dlg.files[i].ext for i in dlg.rows] == [".ogg", ".m4a", ".flac", ".mp3"], "표는 새 순서로")
+
+# ① 한 줄로 이어서: 디스크 없이 1/4 … 4/4 (디스크 번호는 지우기 / 그대로)
+mode_btn = {b.property("mode"): b for b in dlg.modes.buttons()}
+mode_btn["all"].setChecked(True)
+res = {dlg.files[i].ext: r for i, r in enumerate(dlg.result())}
+check(res == {".ogg": ("", "1/4"), ".m4a": ("", "2/4"), ".flac": ("", "3/4"), ".mp3": ("", "4/4")},
+      f"한 줄로 이어서 (디스크 지움) {res}")
+check(dlg.settings.value("ytorder/mode") == "all" and dlg.clear_disc.isEnabled(), "방식 기억 · 디스크 지우기 켜짐")
+dlg.clear_disc.setChecked(False)
+check(all(d is None for d, _ in dlg.result()), "디스크 그대로 두기")
+mp3_row = next(r for r, i in enumerate(dlg.rows) if dlg.files[i].ext == ".mp3")
+check(dlg.table.item(mp3_row, 7).text() == "4/4" and dlg.table.item(mp3_row, 7).font().bold(), "표의 새 트랙 (바뀌면 굵게)")
+mode_btn["year"].setChecked(True)
+check(not dlg.clear_disc.isEnabled() and dlg.result()[dlg.rows[0]] == ("1/3", "1/1"), "② 연도마다 디스크로 돌아감")
+w2 = yo.YtOrderDialog(w, list(w.model.files), w.settings)
+check(w2.mode() == "year", "다음에 열면 마지막 방식")
+w2.deleteLater()
 
 # 업로드 칸에 영상 링크를 넣으면 그 영상으로, 날짜를 넣으면 그 날짜로
 mp3_row = next(r for r, i in enumerate(dlg.rows) if dlg.files[i].ext == ".mp3")
