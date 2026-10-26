@@ -231,7 +231,7 @@ class MainWindow(QMainWindow):
     def _preload(self):
         """창이 뜬 직후 나머지 창 모듈을 미리 불러 둔다. 앱이 켜져 있는 동안 앱 파일이 새 버전으로
         바뀌어도(새로 빌드) 나중에 창을 열 때 다른 버전의 모듈을 읽지 않게 한다."""
-        from . import artworkdialog, backupdialog, compare, covermatch, dupes, export, extractdialog, exttags, rename, renamedialog, ytclean, ytdialog  # noqa: F401
+        from . import artworkdialog, backupdialog, compare, covermatch, dupes, export, extractdialog, exttags, rename, renamedialog, ytclean, ytdialog, ytorder  # noqa: F401
         from . import albumcheck, tagsource, tagsourcedialog  # noqa: F401
         if IS_MAC:
             from . import formatconv, librarycheck  # noqa: F401
@@ -349,6 +349,7 @@ class MainWindow(QMainWindow):
         self._act(m, "YouTube 제목 정리…", self.youtube_clean, "Alt+8")
         m.addSeparator()
         self._act(m, "자동 번호 매기기…", lambda: self.run_converter(AutoNumber), "Ctrl+K")
+        self._act(m, "YouTube 업로드 순서로 번호 매기기…", self.youtube_number)
 
         m = mb.addMenu("설정")
         sub = m.addMenu("ID3 버전")
@@ -556,6 +557,7 @@ class MainWindow(QMainWindow):
         act.addAction("빠른 액션…", self.quick_action)
         act.addAction("YouTube 제목 정리…", self.youtube_clean)
         act.addAction("자동 번호 매기기…", lambda: self.run_converter(AutoNumber))
+        act.addAction("YouTube 업로드 순서로 번호 매기기…", self.youtube_number)
         m.addSeparator()
         m.addAction("목록에서 제거", self.remove_from_list)
         m.addAction("태그 제거…", self.remove_tags)
@@ -641,6 +643,17 @@ class MainWindow(QMainWindow):
         if dlg.exec():
             self._take_order(dlg)
             self.apply_plans(dlg.result_plans(), "자동 번호 매기기")
+
+    def youtube_number(self):
+        """YouTube 채널·재생목록의 업로드 날짜 순서대로 트랙 번호 (선택한 곡, 선택이 없으면 보이는 곡 전체)."""
+        self._confirm_pending()
+        files = self.selected_files() or self.visible_files()
+        if not files:
+            return
+        from .ytorder import YtOrderDialog
+        dlg = YtOrderDialog(self, files, self.settings)
+        if dlg.exec() and dlg.plans:
+            self.apply_plans(dlg.plans, "YouTube 업로드 순서로 번호")
 
     def _confirm_pending(self) -> bool:
         """패널에 저장하지 않은 변경이 있으면 물어본다. False면 취소."""

@@ -380,16 +380,29 @@ def _find_all(o, key, acc):
     return acc
 
 
-def youtube_playlist(list_id: str) -> tuple[str, list[tuple[str, str]]]:
-    """(제목, [(영상 ID, 제목)]) — 100개씩 이어서 끝까지."""
-    html = art.fetch(f"https://www.youtube.com/playlist?list={list_id}&hl=ko", PAGE_LIMIT, YT_HEADERS).decode("utf-8", "replace")
+def _yt_initial(url: str, fail: str):
+    """(페이지 html, ytInitialData)"""
+    html = art.fetch(url, PAGE_LIMIT, YT_HEADERS).decode("utf-8", "replace")
     m = re.search(r"var ytInitialData = (\{.*?\});</script>", html, re.S)
     try:
-        data = json.loads(m.group(1))
+        return html, json.loads(m.group(1))
     except (AttributeError, ValueError) as e:
-        raise ExtractError("재생목록을 읽지 못했습니다. 공개(또는 일부 공개) 재생목록인지 확인해 보세요.") from e
-    meta = _find_all(data, "playlistMetadataRenderer", [])
-    title = (meta[0].get("title") if meta and isinstance(meta[0], dict) else None) or list_id
+        raise ExtractError(fail) from e
+
+
+def _yt_seconds(text) -> int:
+    """'1:02:03' → 3723 (모르면 0)"""
+    parts = str(text or "").strip().split(":")
+    if not all(p.isdigit() for p in parts):
+        return 0
+    n = 0
+    for p in parts:
+        n = n * 60 + int(p)
+    return n
+
+
+def _yt_videos(html, data) -> list[tuple[str, str, int]]:
+    """페이지(재생목록·채널 동영상 탭)의 영상 [(ID, 제목, 길이 초)] — 이어지는 목록까지 끝까지."""
     ver = re.search(r'"INNERTUBE_CLIENT_VERSION":"([^"]+)"', html)
     version = ver.group(1) if ver else "2.20250101.00.00"
     videos, seen = [], set()
@@ -403,10 +416,13 @@ def youtube_playlist(list_id: str) -> tuple[str, list[tuple[str, str]]]:
                 continue
             seen.add(vid)
             t = (((lv.get("metadata") or {}).get("lockupMetadataViewModel") or {}).get("title") or {}).get("content")
-            videos.append((vid, t or vid))
+            badges = [b.get("text") for b in _find_all(lv, "thumbnailBadgeViewModel", []) if isinstance(b, dict)]
+            secs = next((n for n in map(_yt_seconds, badges) if n), 0)
+            videos.append((vid, t or vid, secs))
 
     def next_token(o):
-        toks = _find_all(_find_all(o, "continuationItemViewModel", []), "token", [])
+        holders = _find_all(o, "continuationItemViewModel", []) + _find_all(o, "continuationItemRenderer", [])
+        toks = _find_all(holders, "token", [])
         return next((t for t in toks if isinstance(t, str)), None)
 
     collect(data)
@@ -422,8 +438,38 @@ def youtube_playlist(list_id: str) -> tuple[str, list[tuple[str, str]]]:
         before = len(videos)
         collect(more)
         token = next_token(more) if len(videos) > before else None
+    return videos
+
+
+def youtube_playlist(list_id: str, with_length: bool = False) -> tuple[str, list[tuple]]:
+    """(제목, [(영상 ID, 제목)]) — 100개씩 이어서 끝까지. with_length 면 [(ID, 제목, 길이 초)]."""
+    html, data = _yt_initial(f"https://www.youtube.com/playlist?list={list_id}&hl=ko",
+                             "재생목록을 읽지 못했습니다. 공개(또는 일부 공개) 재생목록인지 확인해 보세요.")
+    meta = _find_all(data, "playlistMetadataRenderer", [])
+    title = (meta[0].get("title") if meta and isinstance(meta[0], dict) else None) or list_id
+    videos = _yt_videos(html, data)
     if not videos:
         raise ExtractError("재생목록에서 영상을 찾지 못했습니다.")
+    return title, videos if with_length else [(v, t) for v, t, _ in videos]
+
+
+def parse_channel(text: str) -> str | None:
+    """채널 주소(@이름, /channel/UC…, /c/…, /user/…) → 채널 첫 주소 (없으면 None)."""
+    s = text.strip()
+    if re.fullmatch(r"@[\w.\-]+", s):
+        return f"https://www.youtube.com/{s}"
+    m = re.search(r"youtube\.com/(@[^/?#\s]+|channel/[\w-]+|c/[^/?#\s]+|user/[^/?#\s]+)", s)
+    return f"https://www.youtube.com/{m.group(1)}" if m else None
+
+
+def youtube_channel(url: str) -> tuple[str, list[tuple[str, str, int]]]:
+    """채널 '동영상' 탭의 영상 (최신 순) → (채널 이름, [(ID, 제목, 길이 초)])"""
+    html, data = _yt_initial(url.rstrip("/") + "/videos?hl=ko", "채널 페이지를 읽지 못했습니다. 주소를 확인해 보세요.")
+    meta = _find_all(data, "channelMetadataRenderer", [])
+    title = (meta[0].get("title") if meta and isinstance(meta[0], dict) else None) or url
+    videos = _yt_videos(html, data)
+    if not videos:
+        raise ExtractError("채널에서 영상을 찾지 못했습니다 ('동영상' 탭만 읽습니다).")
     return title, videos
 
 
