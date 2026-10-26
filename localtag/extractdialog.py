@@ -1,11 +1,13 @@
-"""앨범아트 추출 창 (앨범아트 추출기 앱 이식): 링크 · 내 보관함 · 목록의 곡 · YouTube."""
+"""앨범아트 추출 창 (앨범아트 추출기 앱 이식): 링크 · 내 보관함 · 목록의 곡 · YouTube.
+
+링크·YouTube 는 붙여 넣으면 먼저 작은 그림으로 미리 보여 주고, 체크한 것만 원래 크기로 받는다."""
 from __future__ import annotations
 
 import os
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 
-from PySide6.QtCore import QSize, QStandardPaths, Qt, QThread, Signal
+from PySide6.QtCore import QSize, QStandardPaths, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QIcon, QImage, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QHBoxLayout, QHeaderView,
@@ -18,7 +20,8 @@ from .osutil import IS_MAC, REVEAL_LABEL, reveal
 
 THUMB = 110
 WORKERS = 6
-MARK = {"done": "✅", "failed": "❌", "skipped": "➖", "duplicate": "🔁"}
+MARK = {"done": "✅", "failed": "❌", "skipped": "➖", "duplicate": "🔁", "preview": ""}
+PREVIEW_SIZE = 300  # 미리 보기로 받는 그림 크기 (px)
 
 
 def default_folder() -> str:
@@ -92,6 +95,11 @@ class ExtractDialog(QDialog):
         self.file_albums = []
         self.last_out = ""
         self._cancel_flag = False
+        self.preview = None  # {"tab", "text", "album", "single", "crop"} — 미리 본 묶음 (체크한 것만 받는다)
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.setInterval(700)
+        self._preview_timer.timeout.connect(self._auto_preview)
 
         v = QVBoxLayout(self)
         self.tabs = QTabWidget()
@@ -150,9 +158,23 @@ class ExtractDialog(QDialog):
         self.results.setMovement(QListWidget.Static)
         self.results.setWordWrap(True)
         self.results.setSelectionMode(QAbstractItemView.NoSelection)
+        self.results.itemClicked.connect(self._toggle_pick)
+        self.results.itemDoubleClicked.connect(self._show_big)
         v.addWidget(self.results, 3)
+        prow = QHBoxLayout()
+        self.pick_note = QLabel()
+        self.pick_note.setStyleSheet("color: gray;")
+        prow.addWidget(self.pick_note, 1)
+        self.pick_all = QPushButton("모두 고르기")
+        self.pick_none = QPushButton("모두 빼기")
+        for b, on in ((self.pick_all, True), (self.pick_none, False)):
+            b.setAutoDefault(False)
+            b.clicked.connect(lambda _=False, on=on: self._pick_all(on))
+            prow.addWidget(b)
+        v.addLayout(prow)
         self._placeholder = QPixmap(THUMB, THUMB)
         self._placeholder.fill(Qt.lightGray)
+        self._big = {}
         self._tab_changed(self.tabs.currentIndex())
 
     # ------------------------------------------------------------ 탭
@@ -177,10 +199,14 @@ class ExtractDialog(QDialog):
         row = QHBoxLayout()
         self.link = QLineEdit()
         self.link.setPlaceholderText("Apple Music 앨범 또는 플레이리스트 링크를 붙여넣으세요")
-        self.link.returnPressed.connect(self.start)
+        self.link.returnPressed.connect(self.do_preview)
+        self.link.textChanged.connect(lambda _: self._preview_timer.start())
         row.addWidget(self.link, 1)
         b = QPushButton("붙여넣기")
-        b.clicked.connect(lambda: self.link.setText(QApplication.clipboard().text().strip()))
+        b.clicked.connect(lambda: self._paste(self.link))
+        row.addWidget(b)
+        b = QPushButton("미리 보기")
+        b.clicked.connect(self.do_preview)
         row.addWidget(b)
         v.addLayout(row)
         row = QHBoxLayout()
@@ -191,7 +217,9 @@ class ExtractDialog(QDialog):
         row.addWidget(self.link_unique)
         row.addStretch(1)
         v.addLayout(row)
-        note = QLabel("곡 순서대로 '번호 곡명.jpg' 로 저장합니다. 원본이 고른 크기보다 작으면 원본 크기로 받습니다.")
+        note = QLabel("붙여 넣으면 곡마다 그림을 미리 보여 줍니다 — 체크한 것만 받습니다 (그림을 누르면 체크/해제, "
+                      "두 번 누르면 크게). 곡 순서대로 '번호 곡명.jpg' 로 저장하고, 원본이 고른 크기보다 작으면 원본 크기로 받습니다.")
+        note.setWordWrap(True)
         note.setStyleSheet("color: gray;")
         v.addWidget(note)
         v.addStretch(1)
@@ -256,16 +284,21 @@ class ExtractDialog(QDialog):
         row = QHBoxLayout()
         self.yt = QLineEdit()
         self.yt.setPlaceholderText("YouTube 영상 또는 재생목록 링크를 붙여넣으세요")
-        self.yt.returnPressed.connect(self.start)
+        self.yt.returnPressed.connect(self.do_preview)
         self.yt.textChanged.connect(self._yt_changed)
+        self.yt.textChanged.connect(lambda _: self._preview_timer.start())
         row.addWidget(self.yt, 1)
         b = QPushButton("붙여넣기")
-        b.clicked.connect(lambda: self.yt.setText(QApplication.clipboard().text().strip()))
+        b.clicked.connect(lambda: self._paste(self.yt))
+        row.addWidget(b)
+        b = QPushButton("미리 보기")
+        b.clicked.connect(self.do_preview)
         row.addWidget(b)
         v.addLayout(row)
         row = QHBoxLayout()
         self.yt_which = QComboBox()
         self.yt_which.addItems(["이 영상만", "재생목록 전체"])
+        self.yt_which.currentIndexChanged.connect(lambda _: self._preview_timer.start())
         self.yt_which_label = QLabel("영상과 재생목록이 함께 든 링크:")
         row.addWidget(self.yt_which_label)
         row.addWidget(self.yt_which)
@@ -279,11 +312,13 @@ class ExtractDialog(QDialog):
         row.addWidget(self.yt_crop)
         self.yt_side = self._combo([(f"{s}×{s}", s) for s in ex.YT_SIDES], "extract/yt_side", 720)
         self.yt_crop.toggled.connect(self.yt_side.setEnabled)
+        self.yt_crop.toggled.connect(lambda _: self.preview and self.preview["tab"] == 3 and self.do_preview())
         self.yt_side.setEnabled(self.yt_crop.isChecked())
         row.addWidget(self.yt_side)
         row.addStretch(1)
         v.addLayout(row)
-        note = QLabel("없는 화질이면 한 단계씩 낮춰 받습니다. 자르기는 위아래 검은 띠를 걷어낸 뒤 가운데를 정사각형으로 자릅니다.")
+        note = QLabel("붙여 넣으면 섬네일을 미리 보여 줍니다 — 체크한 것만 받습니다 (자르기를 켜면 잘린 모양으로). "
+                      "없는 화질이면 한 단계씩 낮춰 받습니다. 자르기는 위아래 검은 띠를 걷어낸 뒤 가운데를 정사각형으로 자릅니다.")
         note.setWordWrap(True)
         note.setStyleSheet("color: gray;")
         v.addWidget(note)
@@ -320,6 +355,8 @@ class ExtractDialog(QDialog):
 
     def _tab_changed(self, i):
         self.settings.setValue("extract/tab", i)
+        if hasattr(self, "pick_note"):
+            self._update_pick_note()
         if i == 2:
             self.load_files()
 
@@ -394,7 +431,11 @@ class ExtractDialog(QDialog):
             text = self.link.text().strip()
             if not text:
                 return
-            fn = self._link_job(text, base, self.size.currentData(), self.link_unique.isChecked())
+            pv = self._preview_for(0, text)
+            if pv and not pv[1]:
+                self.msg.setText("받을 그림을 하나 이상 체크해 주세요.")
+                return
+            fn = self._link_job(text, base, self.size.currentData(), self.link_unique.isChecked(), pv)
         elif i == 1:
             rows = sorted({ix.row() for ix in self.lib_table.selectionModel().selectedRows()})
             albums = [self._lib_shown[r] for r in rows] if self.lib_albums else []
@@ -413,12 +454,16 @@ class ExtractDialog(QDialog):
             text = self.yt.text().strip()
             if not text:
                 return
-            fn = self._youtube_job(text, base, self.yt_which.currentIndex() == 1 or not self.yt_which.isVisible(),
-                                   self.yt_quality.currentData(), self.yt_crop.isChecked(), self.yt_side.currentData())
+            pv = self._preview_for(3, text)
+            if pv and not pv[1]:
+                self.msg.setText("받을 섬네일을 하나 이상 체크해 주세요.")
+                return
+            fn = self._youtube_job(text, base, self._yt_whole(), self.yt_quality.currentData(),
+                                   self.yt_crop.isChecked(), self.yt_side.currentData(), pv)
         self._run(fn)
 
-    def _download_all(self, job, items, fetch, path_for):
-        """items 를 동시에 WORKERS 개씩 받아 저장한다. fetch(item) → bytes."""
+    def _download_all(self, job, items, fetch, path_for, rows=None):
+        """items 를 동시에 WORKERS 개씩 받아 저장한다. fetch(item) → bytes. rows: 결과 칸 번호 (미리 본 묶음의 일부만 받을 때)."""
         statuses = ["waiting"] * len(items)
         done = 0
 
@@ -442,45 +487,184 @@ class ExtractDialog(QDialog):
             for i, status, data in pool.map(one, range(len(items))):
                 statuses[i] = status
                 done += 1
-                job.item.emit(i, status, job.thumb(data))
+                job.item.emit(rows[i] if rows else i, status, job.thumb(data))
                 job.progress.emit(done, len(items))
         return statuses
 
-    def _link_job(self, text, base, size, unique):
+    def _link_job(self, text, base, size, unique, pv=None):
         def fn(job):
-            job.message.emit("정보를 불러오는 중…")
-            a = ex.link_album(text)
+            if pv:  # 미리 본 묶음에서 체크한 것만
+                a, rows = pv[0], list(pv[1])
+                items = [a.items[r] for r in rows]
+            else:
+                job.message.emit("정보를 불러오는 중…")
+                a = ex.link_album(text)
+                items, rows = list(a.items), None
             if unique:
-                seen, kept = set(), []
-                for it in a.items:
+                seen, kept, krows = set(), [], []
+                for k, it in enumerate(items):
                     key = ex.hi_res(it.url, size) if it.url else None
                     if key is None or key not in seen:
                         seen.add(key)
                         kept.append(it)
-                a.items = kept
+                        krows.append(rows[k] if rows else k)
+                items, rows = kept, krows
             folder = os.path.join(base, a.folder)
-            job.items.emit(f"{a.artist} - {a.title}" if a.artist else a.title, [f"{it.num} {it.name}" for it in a.items])
-            job.message.emit(f"{len(a.items)}개 받는 중…")
-            st = self._download_all(job, a.items, lambda it: ex.download_item(it, size) if it.url else None,
-                                    lambda it, d: os.path.join(folder, it.filename("jpg")))
+            if not pv:
+                job.items.emit(f"{a.artist} - {a.title}" if a.artist else a.title,
+                               [f"{it.num} {it.name}" for it in items])
+                rows = None
+            job.message.emit(f"{len(items)}개 받는 중…")
+            st = self._download_all(job, items, lambda it: ex.download_item(it, size) if it.url else None,
+                                    lambda it, d: os.path.join(folder, it.filename("jpg")), rows)
             return _summary(st), folder
         return fn
 
-    def _youtube_job(self, text, base, whole, quality, crop, side):
+    def _youtube_job(self, text, base, whole, quality, crop, side, pv=None):
         def fn(job):
-            job.message.emit("정보를 불러오는 중…")
-            a, single = ex.youtube_items(text, whole)
+            if pv:  # 미리 본 묶음에서 체크한 것만
+                a, rows = pv[0], list(pv[1])
+                single = self.preview["single"]
+                items = [a.items[r] for r in rows]
+            else:
+                job.message.emit("정보를 불러오는 중…")
+                a, single = ex.youtube_items(text, whole)
+                items, rows = list(a.items), None
+                job.items.emit(a.title, [f"{it.num} {it.name}".strip() for it in items])
             folder = base if single else os.path.join(base, ex.safe_name(a.title))
-            job.items.emit(a.title, [f"{it.num} {it.name}".strip() for it in a.items])
-            job.message.emit("섬네일 받는 중…" if single else f"재생목록 · {len(a.items)}개 받는 중…")
+            job.message.emit("섬네일 받는 중…" if single else f"재생목록 · {len(items)}개 받는 중…")
 
             def fetch(it):
                 d = ex.youtube_thumbnail(it.url, quality)
                 return ex.center_square(d, side) if crop else d
-            st = self._download_all(job, a.items, fetch, lambda it, d: os.path.join(folder, it.filename("jpg")))
-            out = os.path.join(folder, a.items[0].filename("jpg")) if single else folder
+            st = self._download_all(job, items, fetch, lambda it, d: os.path.join(folder, it.filename("jpg")), rows)
+            out = os.path.join(folder, items[0].filename("jpg")) if single else folder
             return _summary(st, " (삭제·비공개 영상 등)" if st.count("failed") else ""), out
         return fn
+
+    # ------------------------------------------------------------ 미리 보기
+    def _paste(self, edit):
+        edit.setText(QApplication.clipboard().text().strip())
+        self.do_preview()
+
+    def _yt_whole(self):
+        return self.yt_which.currentIndex() == 1 or not self.yt_which.isVisible()
+
+    def _auto_preview(self):
+        """입력이 링크 모양이면 잠시 뒤 알아서 미리 본다."""
+        i = self.tabs.currentIndex()
+        text = (self.link if i == 0 else self.yt).text().strip() if i in (0, 3) else ""
+        try:
+            ok = bool(text) and (ex.parse_apple(text) if i == 0 else any(ex.parse_youtube(text)))
+        except ex.ExtractError:
+            ok = False
+        if ok and not self.job:
+            self.do_preview()
+
+    def _preview_for(self, tab, text):
+        """지금 입력과 같은 링크를 미리 봤으면 (묶음, 체크한 칸 번호)."""
+        p = self.preview
+        if not p or p["tab"] != tab or p["text"] != text or self.results.count() != len(p["album"].items):
+            return None
+        rows = [r for r in range(self.results.count()) if self.results.item(r).checkState() == Qt.Checked]
+        return p["album"], rows
+
+    def do_preview(self):
+        """링크의 곡·영상을 작은 그림으로 받아 보여 준다 (저장은 하지 않는다)."""
+        self._preview_timer.stop()
+        if self.job:
+            return
+        i = self.tabs.currentIndex()
+        if i not in (0, 3):
+            return
+        text = (self.link if i == 0 else self.yt).text().strip()
+        if not text:
+            return
+        whole, crop = self._yt_whole(), self.yt_crop.isChecked()
+        info = {}
+
+        def fn(job):
+            job.message.emit("미리 보기를 불러오는 중…")
+            if i == 0:
+                a, single = ex.link_album(text), False
+                title = f"{a.artist} - {a.title}" if a.artist else a.title
+                names = [f"{it.num} {it.name}" for it in a.items]
+
+                def fetch(it):
+                    return ex.download_item(it, PREVIEW_SIZE) if it.url else None
+            else:
+                a, single = ex.youtube_items(text, whole)
+                title, names = a.title, [f"{it.num} {it.name}".strip() for it in a.items]
+
+                def fetch(it):
+                    d = ex.youtube_thumbnail(it.url, 2)  # 480×360 이면 미리 보기로 충분
+                    return ex.center_square(d, PREVIEW_SIZE) if crop else d
+            info.update(album=a, single=single)
+            job.items.emit(title, names)
+            done = [0]
+
+            def one(k):
+                try:
+                    d = None if job.cancel else fetch(a.items[k])
+                except Exception:
+                    d = None
+                return k, d
+
+            with ThreadPoolExecutor(WORKERS) as pool:
+                for k, d in pool.map(one, range(len(a.items))):
+                    done[0] += 1
+                    img = QImage.fromData(d) if d else QImage()  # 크게 볼 수 있게 줄이지 않고 넘긴다
+                    job.item.emit(k, "preview" if d else "skipped", img)
+                    job.progress.emit(done[0], len(a.items))
+            return "", None
+
+        def shown(_value):
+            self.preview = {"tab": i, "text": text, "album": info.get("album"), "single": info.get("single"), "crop": crop}
+            self.msg.setText("받을 것만 체크한 뒤 추출하기를 누르세요.")
+            for r in range(self.results.count()):
+                it = self.results.item(r)
+                it.setCheckState(Qt.Checked)
+            self._update_pick_note()
+
+        self.preview = None
+        self._run(fn, on_done=shown)
+
+    def _toggle_pick(self, it):
+        if self.job or not self.preview:
+            return
+        it.setCheckState(Qt.Unchecked if it.checkState() == Qt.Checked else Qt.Checked)
+        self._update_pick_note()
+
+    def _pick_all(self, on):
+        if self.job or not self.preview:
+            return
+        for r in range(self.results.count()):
+            self.results.item(r).setCheckState(Qt.Checked if on else Qt.Unchecked)
+        self._update_pick_note()
+
+    def _update_pick_note(self):
+        n = self.results.count()
+        k = sum(1 for r in range(n) if self.results.item(r).checkState() == Qt.Checked)
+        on = bool(self.preview) and self.preview["tab"] == self.tabs.currentIndex()
+        self.pick_all.setVisible(on)
+        self.pick_none.setVisible(on)
+        self.pick_note.setText(f"미리 보기 · {n}개 중 {k}개 받기 — 그림을 누르면 체크/해제, 두 번 누르면 크게" if on else "")
+        self.go_btn.setText(f"{k}개 추출하기" if on and n > 1 else "추출하기")
+
+    def _show_big(self, it):
+        """두 번 누르면 그 그림을 크게 (미리 보기로 받은 그림)."""
+        r = self.results.row(it)
+        img = self._big.get(r) if hasattr(self, "_big") else None
+        if img is None or img.isNull():
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle(it.toolTip())
+        lay = QVBoxLayout(dlg)
+        lab = QLabel()
+        lab.setPixmap(QPixmap.fromImage(img))
+        lab.setAlignment(Qt.AlignCenter)
+        lay.addWidget(lab)
+        dlg.exec()
 
     def _save_albums(self, job, albums, base, unique, get_datas):
         """앨범마다 폴더를 만들어 곡 순서대로 저장. get_datas(album) → [bytes|None]."""
@@ -554,6 +738,10 @@ class ExtractDialog(QDialog):
     def _show_items(self, title, names):
         self.title.setText(title)
         self.results.clear()
+        self._big = {}
+        self.preview = None
+        self._update_pick_note()
+        self.go_btn.setText("추출하기")
         icon = QIcon(self._placeholder)
         for n in names:
             it = QListWidgetItem(icon, n)
@@ -566,8 +754,10 @@ class ExtractDialog(QDialog):
             return
         if not img.isNull():
             it.setIcon(QIcon(QPixmap.fromImage(img)))
+            if status == "preview":
+                self._big[i] = img
         name = it.toolTip()
-        it.setText(f"{MARK.get(status, '')} {name}")
+        it.setText(f"{MARK.get(status, '')} {name}".strip())
 
     def _end(self):
         self.job = None
