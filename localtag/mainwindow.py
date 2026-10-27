@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 from PySide6.QtCore import QEvent, QItemSelection, QItemSelectionModel, QSettings, QStandardPaths, Qt, QTimer, QUrl
@@ -73,9 +74,34 @@ def _app_icon():
 
 
 LOAD_WORKERS = 4
+LOAD_PROBE = 24  # 처음 이만큼은 차례로 읽어 보고 나머지를 동시에 읽을지 정한다
+PROGRESS_STEP = 0.05  # 진행 창은 이 간격(초)으로만 다시 그린다 (곡마다 그리면 그리는 데 더 걸린다)
 UNDO_LEVELS = 30
 UNDO_MEMORY = 512 * 1024 * 1024  # 실행 취소 기록이 이보다 커지면 오래된 것부터 버린다
 BACKUP_BATCH = 32  # 백업 기록을 이만큼씩 모아 디스크에 확정한다 (곡마다 fsync 하면 Windows 에서 곡당 약 2ms)
+
+
+def _read_all(paths, load):
+    """paths 를 차례로 load 한 결과. 처음 몇 곡을 읽는 동안 디스크를 기다리는 시간이 길면(외장 디스크·NAS)
+    나머지는 여러 개를 동시에 읽는다. 내장 SSD 처럼 금방 읽히면 한 줄로 읽는다 — 파이썬은 한 번에 한 스레드만
+    돌아서 동시에 읽으면 오히려 느리다 (보관함 2,500곡: 한 줄 0.9초, 4개 동시 1.4초)."""
+    wall = cpu = 0.0
+    for p in paths[:LOAD_PROBE]:
+        w0, c0 = time.perf_counter(), time.thread_time()
+        r = load(p)
+        wall += time.perf_counter() - w0
+        cpu += time.thread_time() - c0
+        yield r
+    rest = paths[LOAD_PROBE:]
+    if rest and wall > 2 * cpu + 0.005:
+        pool = ThreadPoolExecutor(max_workers=LOAD_WORKERS)
+        try:
+            yield from pool.map(load, rest)
+        finally:
+            pool.shutdown(wait=True, cancel_futures=True)
+    else:
+        for p in rest:
+            yield load(p)
 
 
 class MainWindow(QMainWindow):
@@ -792,21 +818,17 @@ class MainWindow(QMainWindow):
             except Exception as e:  # 손상된 파일 하나 때문에 전체 불러오기가 멈추지 않게
                 return None, (p, str(e))
 
-        if len(paths) <= 8:
-            results = map(load, paths)
-            pool = None
-        else:
-            # 디스크에서 읽는 동안 기다리지 않도록 여러 파일을 동시에 읽는다 (외장 디스크·NAS에서 특히 빠르다)
-            pool = ThreadPoolExecutor(max_workers=LOAD_WORKERS)
-            results = pool.map(load, paths)
+        results = _read_all(paths, load)
         prog = None
         if len(paths) > 30:
             prog = QProgressDialog(label, "취소", 0, len(paths), self)
             prog.setWindowModality(Qt.WindowModal)
             prog.setMinimumDuration(300)
+        next_draw = 0.0
         try:
             for i, (af, err) in enumerate(results):
-                if prog and i % 16 == 0:
+                if prog and time.monotonic() >= next_draw:
+                    next_draw = time.monotonic() + PROGRESS_STEP
                     if prog.wasCanceled():
                         break
                     prog.setValue(i)
@@ -815,8 +837,7 @@ class MainWindow(QMainWindow):
                 else:
                     failed.append(err)
         finally:
-            if pool is not None:
-                pool.shutdown(wait=True, cancel_futures=True)
+            results.close()  # 취소했으면 아직 읽지 않은 것은 버린다
             if prog:
                 prog.close()
         return loaded, failed
@@ -952,8 +973,10 @@ class MainWindow(QMainWindow):
             prog.setWindowModality(Qt.WindowModal)
             prog.setMinimumDuration(300)
         prepared = {}
+        next_draw = 0.0
         for i, p in enumerate(plans):
-            if prog:
+            if prog and time.monotonic() >= next_draw:
+                next_draw = time.monotonic() + PROGRESS_STEP
                 prog.setValue(i)
             if job is not None and i % BACKUP_BATCH == 0:
                 prepared = self._prepare_backups(job, plans, i)

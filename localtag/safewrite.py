@@ -2,8 +2,9 @@
 
 - 사본은 같은 APFS 디스크면 복제본(clone)으로 만들어 즉시 끝난다
   (Windows 는 메모리에 둔다 — 디스크에 새로 만든 파일은 열 때마다 백신 검사로 느려진다)
-- 오디오 데이터(MP3 프레임, FLAC 프레임, M4A mdat)가 바이트 단위로 그대로인지 확인
-- 원본에는 달라진 부분만 다시 쓴다 (파일 번호 유지, 오디오 데이터는 다시 쓰지 않음)
+- 원본에는 달라진 부분만 다시 쓴다 (파일 번호 유지). 오디오 데이터(MP3 프레임, FLAC 프레임, M4A mdat)의
+  위치가 그대로면 원본의 오디오는 읽지도 쓰지도 않고 태그 부분만 비교해 다시 쓴다 (곡당 수 MB → 수백 KB).
+  태그가 커져 오디오가 뒤로 밀렸으면 오디오 데이터가 바이트 단위로 같은지 확인한 뒤 다시 쓴다
 - 작업 도중 다른 프로그램이 원본을 바꿨으면 교체하지 않음
 - iCloud에서 아직 내려받지 않은 파일, 링크, 읽기 전용 파일은 건드리지 않음
 """
@@ -311,19 +312,21 @@ def safe_modify(path: str, fn, enabled: bool = True, keep_mtime: bool = False, i
             raise SafeWriteError("재생 시간이 달라져 저장을 취소했습니다. 원본은 그대로입니다.")
         # 오디오 데이터 확인: 위치가 그대로면(보통) 덮어쓰기 전 비교에서 함께 확인하고, 옮겨졌으면 따로 비교한다
         ra, rb = payload_regions(path), payload_regions(stage)
-        protect = None
+        protect, moved = None, False
         if ra is not None:
             if rb is None or [n for _, n in ra] != [n for _, n in rb]:
                 raise SafeWriteError(AUDIO_CHANGED)
             if ra == rb:
-                protect = ra
+                protect = ra  # 오디오 위치가 그대로 (보통) — 원본의 오디오는 다시 쓰지 않으므로 그대로 남는다
             elif same_payload(path, stage) is not True:
                 raise SafeWriteError(AUDIO_CHANGED)
+            else:
+                moved = True  # 태그가 커져 오디오가 밀렸다 (같은 내용임은 확인했다)
         now = os.stat(path)
         if (now.st_size, now.st_mtime_ns, now.st_ino) != (st.st_size, st.st_mtime_ns, st.st_ino):
             raise SafeWriteError("작업하는 동안 다른 프로그램이 파일을 바꿨습니다. 원본은 그대로입니다.")
         try:
-            write_back(stage, path, protect)
+            write_back(stage, path, protect, rewrite_rest=moved)
         except StageKeptError:
             keep_stage = True
             raise
@@ -335,35 +338,58 @@ def safe_modify(path: str, fn, enabled: bool = True, keep_mtime: bool = False, i
     return result
 
 
-def _differing_chunks(read_src, d, size, protect):
-    """같은 위치끼리 비교해 다른 조각 [(위치, 길이)]. protect(오디오 위치) 안이 다르면 SafeWriteError."""
+def _outside(size, protect):
+    """[0, size) 에서 protect 구간을 뺀 나머지 [(시작, 끝)]."""
+    spans, pos = [], 0
+    for start, n in sorted(protect or ()):
+        if start > pos:
+            spans.append((pos, min(start, size)))
+        pos = max(pos, start + n)
+    if pos < size:
+        spans.append((pos, size))
+    return [(lo, hi) for lo, hi in spans if lo < hi]
+
+
+def _differing_chunks(read_src, d, size, protect, rewrite_rest=False):
+    """같은 위치끼리 비교해 다른 조각 [(위치, 길이)]. protect(오디오 위치)는 원본에 쓰지 않으므로 읽지도 않는다.
+    rewrite_rest: 처음 달라진 곳부터 끝까지는 비교하지 않고 모두 다시 쓴다 (내용이 밀린 경우)."""
     chunks = []
-    off = 0
-    while off < size:
-        a = read_src(min(CHUNK, size - off), off)
-        if not a:
-            raise SafeWriteError("작업 사본을 읽지 못했습니다. 원본은 그대로입니다.")
-        b = _pread(d, len(a), off)
-        if a != b:
-            end = off + len(a)
-            for start, n in protect or ():
-                lo, hi = max(off, start), min(end, start + n)
-                if lo < hi and a[lo - off:hi - off] != b[lo - off:hi - off]:
-                    raise SafeWriteError(AUDIO_CHANGED)
-            chunks.append((off, len(a)))
-        off += len(a)
+    for lo, hi in _outside(size, protect):
+        off = lo
+        while off < hi:
+            n = min(CHUNK, hi - off)
+            if rewrite_rest and chunks:
+                chunks.append((off, n))
+                off += n
+                continue
+            a = read_src(n, off)
+            if not a:
+                raise SafeWriteError("작업 사본을 읽지 못했습니다. 원본은 그대로입니다.")
+            if a != _pread(d, len(a), off):
+                chunks.append((off, len(a)))
+            off += len(a)
     return chunks
 
 
-def write_back(src, dst: str, protect=None):
+def _same_regions(src, dst: str, regions) -> bool:
+    """src(경로 또는 메모리 사본)와 dst 의 regions 위치 내용이 같은지."""
+    try:
+        with _reader(src) as fa, open(dst, "rb") as fb:
+            return _same_bytes(fa, fb, regions, regions)
+    except OSError:
+        return False
+
+
+def write_back(src, dst: str, protect=None, rewrite_rest=False):
     """검증한 사본(src: 경로 또는 메모리 사본)의 내용을 원본(dst) 파일 안에 다시 쓴다.
 
     파일을 통째로 바꿔치기(os.replace)하면 내용이 같아도 다른 파일(새 inode)이 되어,
     파일 번호로 곡 위치를 기억하는 Apple Music이 저장 직후 곡을 잠깐 찾지 못한다.
     같은 파일에 덮어쓰면 Music·Finder 별칭·하드 링크가 그대로 유지된다.
     먼저 비교해 달라진 부분(보통 앞쪽의 태그)만 쓰므로 오디오 데이터는 다시 쓰지 않는다.
-    protect: 바뀌면 안 되는 위치 [(시작, 길이)] — 비교할 때 다르면 아무것도 쓰지 않고 SafeWriteError.
-    쓰는 도중에 실패하면 사본으로 원본을 교체해 반쯤 쓰인 파일이 남지 않게 한다.
+    protect: 오디오 데이터 위치 [(시작, 길이)] — 원본과 사본에서 같은 위치라 이 부분은 원본 그대로 두고 비교도 하지 않는다.
+    rewrite_rest: 내용이 밀린 경우 — 처음 달라진 곳부터는 원본을 읽지 않고 모두 다시 쓴다.
+    쓰는 도중에 실패하면 사본으로 원본을 교체해 반쯤 쓰인 파일이 남지 않게 한다 (protect 부분이 같은지 확인한 뒤).
     """
     if isinstance(src, str):
         s = os.open(src, os.O_RDONLY | O_BINARY)
@@ -391,7 +417,7 @@ def write_back(src, dst: str, protect=None):
         if d is not None:
             try:
                 try:
-                    chunks = _differing_chunks(read_src, d, size, protect)
+                    chunks = _differing_chunks(read_src, d, size, protect, rewrite_rest)
                 except OSError as e:
                     raise SafeWriteError(f"원본과 비교하지 못했습니다. 원본은 그대로입니다.\n{e}") from e
                 touched = True
@@ -418,7 +444,12 @@ def write_back(src, dst: str, protect=None):
     finally:
         if s is not None:
             os.close(s)
-    # 원본을 열 수 없거나 반쯤 쓰였을 수 있으므로 검증된 사본으로 교체한다 (내용은 올바름)
+    # 원본을 열 수 없거나 반쯤 쓰였을 수 있으므로 검증된 사본으로 교체한다 — 비교하지 않고 둔 오디오 부분이
+    # 사본에서도 같은지 먼저 확인한다 (원본의 그 부분은 쓰지 않았으므로 그대로다)
+    if protect and not _same_regions(src, dst, protect):
+        msg = ("원본에 쓰다가 실패해 일부만 바뀌었을 수 있습니다. 백업에서 되돌려 주세요." if touched
+               else "원본을 다시 쓰지 못했습니다. 원본은 그대로입니다.")
+        raise SafeWriteError(msg)
     if not isinstance(src, str):  # 메모리 사본은 이때만 디스크에 내려놓는다
         path = os.path.join(os.path.dirname(dst), f"{STAGE_PREFIX}{uuid.uuid4().hex}{os.path.splitext(dst)[1]}")
         try:

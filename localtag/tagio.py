@@ -158,8 +158,10 @@ def _picture(data: bytes, mime: str, ptype: int, desc: str) -> Picture:
         for r in refs:
             other = r()
             if other is not None and (other.data is data or other.data == data):
-                return Picture(other.data, mime, ptype, desc)
+                data = other.data
+                break
         pic = Picture(data, mime, ptype, desc)
+        # 함께 쓰는 것도 모두 적어 둔다 — 처음 것만 적으면 그것이 사라질 때 같은 그림을 다시 못 찾는다
         refs.append(weakref.ref(pic, lambda _r, key=key: _dead.append(key)))
         return pic
 
@@ -1036,9 +1038,27 @@ class Snapshot:
                 return 64 * len(frames) + _blob_size([getattr(f, "data", b"") for f in frames], seen)
             if self.kind == "flac" and self.data is not None:
                 return 1024 + _blob_size([p.data for p in self.data[1]], seen)
+            if self.kind == "mp4" and self.data is not None:
+                return 64 * len(self.data) + _blob_size([c.data for c in self.data.get("covr", ())], seen)
+            if self.kind == "ape" and self.data is not None:
+                return 64 * len(self.data) + _blob_size([getattr(v, "value", b"") for v in self.data.values()], seen)
+            if self.kind in ("ogg", "asf") and self.data is not None:  # 커버가 태그 값 안에 (base64·바이트)
+                return 64 * len(self.data) + sum(_value_size(v) for _, v in self.data)
         except Exception:
             pass
         return 4096
+
+
+@dataclass(frozen=True)
+class _SnapCover:
+    """스냅샷 속 MP4 커버. MP4Cover 는 bytes 라 다른 bytes 와 메모리를 함께 쓸 수 없어 데이터와 형식만 둔다."""
+    data: bytes
+    imageformat: int
+
+
+def _value_size(v) -> int:
+    v = getattr(v, "value", v)
+    return len(v) if isinstance(v, (str, bytes, bytearray)) else 16
 
 
 def _blob_size(blobs, seen):
@@ -1077,7 +1097,11 @@ def _snapshot_of(mf, path: str, times) -> Snapshot:
             p.data = _share(p.data)
     elif kind in ("ogg", "asf"):
         data = None if tags is None else copy.deepcopy(list(tags))
-    elif kind in ("mp4", "ape"):
+    elif kind == "mp4":  # 커버는 목록의 파일과 메모리를 함께 쓴다 (곡마다 따로 복사하면 수백 MB)
+        data = None if tags is None else {
+            k: [_SnapCover(_share(bytes(c)), c.imageformat) for c in v] if k == "covr" else copy.deepcopy(v)
+            for k, v in tags.items()}
+    elif kind == "ape":
         data = None if tags is None else {k: copy.deepcopy(v) for k, v in tags.items()}
     else:
         raise UnsupportedFile("스냅샷을 지원하지 않는 형식")
@@ -1151,6 +1175,7 @@ def _restore_into(path: str, snap: Snapshot):
                 mf.add_tags()
             mf.tags.clear()
             for k, v in snap.data.items():
-                mf.tags[k] = copy.deepcopy(v)
+                mf.tags[k] = ([MP4Cover(c.data, c.imageformat) for c in v] if kind == "mp4" and k == "covr"
+                              else copy.deepcopy(v))
             mf.save(rewind(path))
     return before
