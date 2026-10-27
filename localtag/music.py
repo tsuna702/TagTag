@@ -215,9 +215,11 @@ end run
 # 한 곡을 반영한 뒤 Music 상태를 확인하는 간격 (ID_SCRIPT 의 delay 와 같아야 한다).
 # 위치가 두 번 연속 같으면 안정된 것으로 보므로, 간격이 짧을수록 최소 대기 그대로 넘어갈 수 있다.
 TICK = 0.1
-PACES = {"fast": (0.4, 4.0), "normal": (0.8, 6.0), "slow": (1.1, 10.0)}
-PACE_LABELS = {"fast": "빠르게 (곡마다 0.4초 이상)", "normal": "보통 (곡마다 0.8초 이상)",
-               "slow": "천천히 (곡마다 1.1초 이상)"}
+# batch: 곡마다 기다리지 않고 몰아서 새로 읽게 한 뒤, 확인 단계에서 아직 옛 정보인 곡만 다시 반영한다.
+#   0.9.7 부터 저장 전에 ID 를 찾아 두어 몰아 보내도 앨범이 갈라지지 않음을 사용자가 확인했다 (2026-10-27, 30곡).
+PACES = {"batch": (0.0, 0.0), "fast": (0.4, 4.0), "normal": (0.8, 6.0), "slow": (1.1, 10.0)}
+PACE_LABELS = {"batch": "몰아서 (기다리지 않고 한꺼번에, 끝난 뒤 확인)", "fast": "빠르게 (곡마다 0.4초 이상)",
+               "normal": "보통 (곡마다 0.8초 이상)", "slow": "천천히 (곡마다 1.1초 이상)"}
 DEFAULT_PACE = "fast"  # 0.9.7 부터 저장 전에 곡을 찾아 두어 몰아서 반영되지 않으므로 빠르게도 갈라지지 않음
 
 PREFLIGHT = '''
@@ -554,7 +556,10 @@ def refresh(paths, progress=lambda *_: None, cancelled=lambda: False, expected=N
         다른 값으로 바뀌었으면(반영하는 사이 Music 에서 직접 고친 경우) 다시 반영하지 않고 그 값을 따른다.
     """
     min_wait, max_wait = PACES.get(pace, PACES[DEFAULT_PACE])
-    ticks = [str(max(1, round(min_wait / TICK))), str(max(2, round(max_wait / TICK)))]
+    if max_wait <= 0:
+        ticks = ["0", "0"]  # 몰아서: ID_SCRIPT 가 곡마다 기다리지 않는다
+    else:
+        ticks = [str(max(1, round(min_wait / TICK))), str(max(2, round(max_wait / TICK)))]
     keys = list(dict.fromkeys(os.path.realpath(p) for p in paths))
     if not keys:
         raise MusicError("Music에 반영할 곡을 선택해 주세요.")
