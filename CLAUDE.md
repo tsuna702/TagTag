@@ -27,6 +27,7 @@ Mp3tag 를 본뜬 음악 태그 편집기. Python 3 + PySide6(Qt) + mutagen. Git
      `setTestModeEnabled` 만 쓰면 `~/.qttest` 같은 곳에 쌓인다 — 예전에 5GB까지 커져 사용자가 지적했다.
    - Apple Music 자동 반영을 켠 채로 저장하지 않는다 (harness 가 확인한다). 실제 Music 보관함은 읽기만.
    - 테스트를 돌리면 **이번 실행 폴더만 남기고 이전 테스트 파일은 지운다** (harness 가 `tests/runs/` 에서 자동으로).
+     이번 실행 폴더도 끝날 때 200MB 를 넘으면 지운다 (`harness.KEEP_LIMIT` — 곡을 많이 복사하는 속도 측정은 harness 를 쓰면 저절로 정리된다).
    - 샘플은 저장소 `samples/` 를 실행 폴더로 복사해서 쓴다. 원본 샘플을 고치지 않는다.
    - 실행: `python tests/smoke.py`, `python tests/test_*.py` (Windows: `.venv\Scripts\python tests\smoke.py`).
      새 기능에는 `tests/` 에 테스트를 더한다. 인터넷이 필요한 기능은 가짜 데이터로 시험한다.

@@ -6,7 +6,10 @@
 - 앱 데이터(백업 등): QStandardPaths.writableLocation 을 이번 실행 폴더 안으로 돌린다
   (setTestModeEnabled 만 쓰면 ~/.qttest 등에 쌓인다 — 예전에 5GB까지 커졌던 적이 있다).
 - 실행 폴더: tests/runs/<날짜-시각>/ — 실행할 때마다 새로 만들고, 이전 실행 폴더는 지운다.
+  끝날 때 실행 폴더가 KEEP_LIMIT 보다 크면(곡을 수백 개 복사하는 속도 측정 등) 그 폴더도 지운다
+  — 300곡 측정 하나가 곡 1.8GB + 백업 1.8GB 를 남긴 적이 있다.
 """
+import atexit
 import os
 import shutil
 import sys
@@ -26,6 +29,26 @@ for old in os.listdir(RUNS):
     if p != RUN and os.path.isdir(p):
         shutil.rmtree(p, ignore_errors=True)
 os.makedirs(RUN, exist_ok=True)
+KEEP_LIMIT = 200 * 1024 * 1024  # 끝난 뒤 남겨 둘 실행 폴더 크기 한도
+
+
+def _size(path):
+    total = 0
+    for dirpath, _, names in os.walk(path):
+        for n in names:
+            try:
+                total += os.lstat(os.path.join(dirpath, n)).st_size
+            except OSError:
+                pass
+    return total
+
+
+@atexit.register
+def _drop_big_run():
+    size = _size(RUN)
+    if size > KEEP_LIMIT:
+        shutil.rmtree(RUN, ignore_errors=True)
+        print(f"실행 폴더가 {size / 1024 ** 2:.0f}MB 라 지웠습니다 — {RUN}")
 
 from PySide6.QtCore import QSettings, QStandardPaths  # noqa: E402
 from PySide6.QtWidgets import QApplication, QMessageBox  # noqa: E402
