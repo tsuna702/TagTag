@@ -70,6 +70,7 @@ ITEMS = {
     "actions": ("액션 그룹…", lambda w: w.run_action_groups(), keys("액션 그룹 실행 (⌥6)"), "sel"),
     "quick_action": ("빠른 액션…", lambda w: w.quick_action(), keys("액션 하나 바로 실행 (⌥7)"), "sel"),
     "youtube": ("YouTube 제목 정리…", lambda w: w.youtube_clean(), keys("YouTube 꼬리말 떼기 (⌥8)"), "files"),
+    "classical": ("작품·악장 나누기…", lambda w: w.split_classical(), "클래식 제목을 작품 · 악장으로", "files"),
     "convert": ("형식 변환…", lambda w: w.convert_formats(), "FLAC 등을 ALAC · AAC 로", "sel"),
     "export": ("내보내기…", lambda w: w.export_list(), keys("CSV · HTML · 텍스트 (⌘E)"), "files"),
     "playlist": ("재생목록…", lambda w: w.make_playlist(), keys("M3U8 재생목록 만들기 (⌘L)"), "files"),
@@ -87,7 +88,7 @@ if IS_MAC:
 CATEGORIES = [
     ("기본", ["save", "undo", "redo", "refresh", "clear", "open", "add_folder", "remove"]),
     ("목록 · 재생", ["reveal", "play", "up", "down", "filter"]),
-    ("태그 고치기", ["rename", "number", "autonumber", "yt_number", "yt_number_year", "tag_source", "exttags", "remove_tags"]),
+    ("태그 고치기", ["rename", "number", "autonumber", "yt_number", "yt_number_year", "tag_source", "classical", "exttags", "remove_tags"]),
     ("변환", ["tag2file", "file2tag", "file2file", "text2tag", "tag2tag", "convert"]),
     ("커버", ["artwork", "match_covers", "resize_covers", "extract"]),
     ("점검 · 정리", ["compare", "dupes", "albumcheck", "youtube"]),

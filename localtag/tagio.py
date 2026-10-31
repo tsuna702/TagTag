@@ -435,7 +435,9 @@ MP4_EXT = {
     "ENCODEDBY": "©too", "ALBUMSORT": "soal", "ARTISTSORT": "soar", "TITLESORT": "sonm",
     "ALBUMARTISTSORT": "soaa", "COMPOSERSORT": "soco", "COMPILATION": "cpil",
     "DESCRIPTION": "desc", "WORK": "©wrk", "MOVEMENTNAME": "©mvn",
+    "MOVEMENT": "©mvi", "MOVEMENTTOTAL": "©mvc", "SHOWMOVEMENT": "shwm",
 }
+MP4_INTS = {"tmpo", "©mvi", "©mvc", "shwm"}  # 숫자로 저장하는 칸
 MP4_EXT_REV = {v: k for k, v in MP4_EXT.items()}
 FREEFORM = "----:com.apple.iTunes:"
 
@@ -514,7 +516,7 @@ def _mp4_write(tags, changes, pictures):
             tags.pop(key, None)
             if not vals:
                 continue
-            if key == "tmpo":
+            if key in MP4_INTS:
                 try:
                     tags[key] = [int(float(vals[0]))]
                 except ValueError:

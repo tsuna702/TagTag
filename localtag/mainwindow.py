@@ -257,7 +257,7 @@ class MainWindow(QMainWindow):
     def _preload(self):
         """창이 뜬 직후 나머지 창 모듈을 미리 불러 둔다. 앱이 켜져 있는 동안 앱 파일이 새 버전으로
         바뀌어도(새로 빌드) 나중에 창을 열 때 다른 버전의 모듈을 읽지 않게 한다."""
-        from . import artworkdialog, backupdialog, compare, covermatch, dupes, export, extractdialog, exttags, rename, renamedialog, ytclean, ytdialog, ytorder  # noqa: F401
+        from . import artworkdialog, backupdialog, classicaldialog, compare, covermatch, dupes, export, extractdialog, exttags, rename, renamedialog, ytclean, ytdialog, ytorder  # noqa: F401
         from . import albumcheck, tagsource, tagsourcedialog  # noqa: F401
         if IS_MAC:
             from . import formatconv, librarycheck  # noqa: F401
@@ -373,6 +373,7 @@ class MainWindow(QMainWindow):
         self._act(m, "액션 그룹…", self.run_action_groups, "Alt+6")
         self._act(m, "빠른 액션…", self.quick_action, "Alt+7")
         self._act(m, "YouTube 제목 정리…", self.youtube_clean, "Alt+8")
+        self._act(m, "클래식 작품·악장 나누기…", self.split_classical)
         m.addSeparator()
         self._act(m, "자동 번호 매기기…", lambda: self.run_converter(AutoNumber), "Ctrl+K")
         sub = m.addMenu("YouTube 업로드 순서로 번호 매기기")
@@ -584,6 +585,7 @@ class MainWindow(QMainWindow):
         act.addAction("액션 그룹…", self.run_action_groups)
         act.addAction("빠른 액션…", self.quick_action)
         act.addAction("YouTube 제목 정리…", self.youtube_clean)
+        act.addAction("클래식 작품·악장 나누기…", self.split_classical)
         act.addAction("자동 번호 매기기…", lambda: self.run_converter(AutoNumber))
         yt = act.addMenu("YouTube 업로드 순서로 번호 매기기")
         yt.addAction("① 한 줄로 이어서 트랙 번호…", lambda: self.youtube_number("all"))
@@ -1417,6 +1419,19 @@ class MainWindow(QMainWindow):
         dlg = YtCleanDialog(self, files, self.settings)
         if dlg.exec():
             self.apply_plans(dlg.result_plans(), "YouTube 제목 정리")
+
+    def split_classical(self):
+        """제목을 작품 · 악장 번호 · 악장 이름으로 나눈다 (Music 이 같은 작품의 악장을 묶어 보여 줌).
+        고른 곡, 고른 곡이 없으면 목록에 보이는 곡 전체."""
+        self._confirm_pending()
+        files = self.selected_files() or self.visible_files()
+        if not files:
+            QMessageBox.information(self, APP_NAME, "나눌 곡을 목록에 먼저 불러오세요.")
+            return
+        from .classicaldialog import ClassicalDialog
+        dlg = ClassicalDialog(self, files, self.settings)
+        if dlg.exec():
+            self.apply_plans(dlg.result_plans(), "클래식 작품·악장 나누기")
 
     def compare_tags(self):
         files = self.selected_files()
