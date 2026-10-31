@@ -19,6 +19,7 @@ CASES = {
     "3 Sonetti del Petrarca, S. 270a: III. I' vidi": ("3 Sonetti del Petrarca, S. 270a", 3, "I' vidi"),
     "Symphonische Etüden, Op. 13: VIII. Variation 5 (post.)": ("Symphonische Etüden, Op. 13", 8, "Variation 5 (post.)"),
     "The Goldberg Variations, BWV 988: Aria": ("The Goldberg Variations, BWV 988", 0, "Aria"),
+    "Four Impromptus, Op. 90, D. 899: No. 3 in G-Flat Major": ("Four Impromptus, Op. 90, D. 899", 3, "No. 3 in G-Flat Major"),
     "Suite: 10 Pieces": ("Suite", 0, "10 Pieces"),
     "Sonata: I Will": ("Sonata", 0, "I Will"),
     "Milonga Del Angel": None,

@@ -41,7 +41,10 @@ def split_title(title: str):
         val = int(raw) if raw.isdigit() else roman(raw)
         # 띄어쓰기만 있으면 'No. 6 June' 처럼 앞에 No. 가 있을 때만 번호 ('10 Pieces', 'I Will' 은 이름)
         if val and (n["pre"] or n["sep"].strip()):
-            num, name = val, n["name"].strip()
+            num = val
+            # 'No. 3 in G-Flat Major' 은 조성만 남으면 어색하므로 이름에 번호를 그대로 둔다
+            if not n["name"].lower().startswith("in "):
+                name = n["name"].strip()
     if not work or not name:
         return None
     return work, num, name
