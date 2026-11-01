@@ -1,6 +1,8 @@
 """오래 걸리는 작업(Music 연동 등)을 백그라운드에서 돌리고 진행률을 보여 준다."""
 from __future__ import annotations
 
+import time
+
 from PySide6.QtCore import QThread, Qt, Signal
 from PySide6.QtWidgets import QProgressDialog
 
@@ -69,3 +71,17 @@ def run_task(parent, title, fn, on_done, on_fail, modal=True, status=None):
     task.finished.connect(cleanup)
     task.start()
     return task
+
+
+def stop_tasks(owner, timeout=10.0) -> bool:
+    """닫기 전에: owner 아래에서 도는 작업에 취소를 알리고 끝나기를 기다린다. 다 끝났으면 True.
+
+    도는 QThread 가 창과 함께 지워지면 Qt 가 앱을 죽인다 (1.1.10: Music 반영 중에 종료 → abort).
+    """
+    tasks = [t for t in owner.findChildren(Task) if t.isRunning()]
+    for t in tasks:
+        t.cancel_requested = True
+    end = time.monotonic() + timeout
+    for t in tasks:
+        t.wait(max(0, int((end - time.monotonic()) * 1000)))
+    return not any(t.isRunning() for t in tasks)

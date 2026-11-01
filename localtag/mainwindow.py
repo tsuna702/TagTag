@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
 from .actiondialogs import ActionEditDialog, ActionsDialog, PlansPreview, choose_action_type
 from . import music
 from .osutil import IS_MAC, IS_WIN, REVEAL_LABEL, keys, reveal
-from .tasks import run_task
+from .tasks import run_task, stop_tasks
 from .backup import BackupStore
 from .actions import ActionStore, describe, new_action, run_actions
 from .converters import CONVERTERS, AutoNumber
@@ -2067,6 +2067,9 @@ class MainWindow(QMainWindow):
         self.settings.setValue("header_state", self.table.horizontalHeader().saveState())
         self.settings.setValue("header_cols", len(COLUMNS))
         self.settings.setValue("splitter", self.splitter.saveState())
+        if not stop_tasks(self):
+            self.settings.sync()
+            self.tasks_left = True  # main() 이 창을 지우지 않고 바로 끝낸다
         super().closeEvent(e)
 
 
@@ -2150,4 +2153,9 @@ def main(argv=None):
         w.load_paths(paths, replace=True)
     else:
         QTimer.singleShot(0, w.reopen_last)
-    return app.exec()
+    code = app.exec()
+    if getattr(w, "tasks_left", False):
+        # 취소해도 끝나지 않은 작업 — 창을 지우면 도는 스레드 때문에 Qt 가 앱을 죽이므로 정리 없이 끝낸다
+        sys.stdout.flush()
+        os._exit(code)
+    return code
