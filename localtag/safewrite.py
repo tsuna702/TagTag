@@ -140,7 +140,8 @@ def copy_preserving(src: str, dst: str):
 def _fsync(path: str):
     if IS_WIN and os.path.isdir(path):
         return  # Windows 는 폴더를 열어 fsync 할 수 없다 (NTFS 가 이름 바꾸기를 기록해 둔다)
-    fd = os.open(path, os.O_RDONLY | O_BINARY)
+    # Windows 의 fsync(_commit)는 쓰기로 연 파일에만 된다 — 읽기 전용으로 열면 EBADF
+    fd = os.open(path, (os.O_RDWR if IS_WIN else os.O_RDONLY) | O_BINARY)
     try:
         os.fsync(fd)
     finally:
