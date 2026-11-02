@@ -80,8 +80,9 @@ on run argv
                     set cands to (every file track of library playlist 1 whose name is (item (k + 1) of argv) and album is (item (k + 2) of argv))
                     repeat with c in cands
                         try
-                            if POSIX path of (location of c as alias) is p then
-                                set pid to persistent ID of c
+                            set r to properties of c -- 위치·ID 를 한 번에 (따로 물으면 곡마다 Music 에 한 번씩 더 묻는다)
+                            if POSIX path of (location of r) is p then
+                                set pid to persistent ID of r
                                 exit repeat
                             end if
                         end try
@@ -100,12 +101,46 @@ end run
 '''
 
 
+LIBRARY_MIN = 15  # 이만큼 넘게 찾을 때는 보관함 파일(iTunesLibrary)에서 한 번에 읽는다 (보관함 전체 0.8초 · 곡마다 묻기 0.04초)
+
+LIVE_IDS_SCRIPT = '''
+tell application "Music"
+    set AppleScript's text item delimiters to linefeed
+    return (persistent ID of every file track of library playlist 1) as text
+end tell
+'''
+
+
+def _from_library(items) -> dict:
+    """iTunesLibrary 로 찾은 {실제 경로: pid} — 지금 Music 에 있는 ID 만 (보관함 파일이 늦게 저장됐을 수 있으므로)."""
+    from .librarycheck import library_ids
+    try:
+        ids = library_ids()
+        if not ids:
+            return {}
+        live = set(_osascript(LIVE_IDS_SCRIPT, timeout=60).split())
+    except Exception:
+        return {}
+    out = {}
+    for p, _title, _album in items:
+        real = os.path.realpath(p)
+        pid = ids.get(_nfc(real))
+        if pid in live:
+            out[real] = pid
+    return out
+
+
 def prelookup(items, progress=lambda *_: None, cancelled=lambda: False) -> dict:
     """저장하기 전 곡들의 persistent ID. items: [(경로, 지금 제목, 지금 앨범)] → {실제 경로: pid} (찾은 것만).
-    Music 이 꺼져 있거나 권한이 없으면 빈 dict (반영할 때 예전 방식으로 찾는다)."""
+    Music 이 꺼져 있거나 권한이 없으면 빈 dict (반영할 때 예전 방식으로 찾는다).
+    곡이 많으면 보관함 파일에서 한 번에 읽고, 거기서 못 찾은 곡(막 추가한 곡 등)만 Music 에 묻는다."""
     if not items or not _music_running():
         return {}
     out = {}
+    if len(items) > LIBRARY_MIN:
+        progress(0, len(items), "Music 보관함에서 곡 찾는 중")
+        out = _from_library(items)
+        items = [x for x in items if os.path.realpath(x[0]) not in out]
     for start in range(0, len(items), 40):  # 명령줄 길이 제한
         if cancelled():
             break
@@ -126,7 +161,7 @@ def prelookup(items, progress=lambda *_: None, cancelled=lambda: False) -> dict:
 #   read:    인자 = read, <pid>, <pid>, …
 #   refresh: 인자 = refresh, <최소 대기 칸>, <최대 대기 칸>, <pid>, <제목>, <앨범>, <pid>, <제목>, <앨범>, …
 #            (한 칸 = TICK 초)
-#   LOCALTAG_INFO:<pid>\t<제목>\t<앨범>\t<경로>
+#   LOCALTAG_INFO:<pid>\t<제목>\t<앨범>\t<경로>  ('몰아서' refresh(최대 대기 0)는 새로 읽으라고만 하고 정보 줄이 없다)
 # 새로 읽기는 한 곡씩, Music이 그 곡을 다 처리할 때까지 기다린 뒤 다음 곡으로 넘어간다:
 #   - 최소 대기 시간이 지났고
 #   - Music에 새 제목·앨범이 보이고
@@ -142,6 +177,11 @@ on fileExists(p)
         return false
     end try
 end fileExists
+
+-- Music 에 보내는 tell 블록 안에서 log 를 쓰면 줄마다 Music 에 한 번씩 물어 17ms 씩 든다
+on emitLine(s)
+    log s
+end emitLine
 
 on run arguments
     set mode to item 1 of arguments
@@ -161,50 +201,58 @@ on run arguments
             set pid to item k of args
             try
                 with timeout of 60 seconds
-                    set t to first file track of library playlist 1 whose persistent ID is pid
-                    if mode is "refresh" then
-                        set wantName to item (k + 1) of args
-                        set wantAlbum to item (k + 2) of args
-                        refresh t
-                        set lastLoc to ""
-                        set steady to 0
-                        set seenTick to 0
-                        set usedTick to maxTicks
-                        repeat with tick from 1 to maxTicks
-                            delay 0.1
-                            set curLoc to ""
-                            try
-                                set curLoc to POSIX path of (get location of t)
-                            end try
-                            if curLoc is not "" and curLoc is lastLoc and (my fileExists(curLoc)) then
-                                set steady to steady + 1
-                            else
-                                set steady to 0
-                            end if
-                            set lastLoc to curLoc
-                            set isMatch to (wantName is "" and wantAlbum is "") or ((name of t as text) is wantName and (album of t as text) is wantAlbum)
-                            if isMatch and seenTick is 0 then set seenTick to tick
-                            if tick >= minTicks and steady >= 2 and isMatch then
-                                set usedTick to tick
-                                exit repeat
-                            end if
-                        end repeat
-                        -- 진단: 새 정보가 보인 시점 · 다음 곡으로 넘어간 시점 (칸 = 0.1초)
-                        log "LOCALTAG_TIMING:" & pid & tab & seenTick & tab & usedTick & tab & (name of t as text) & tab & (album of t as text)
+                    if mode is "refresh" and maxTicks is 0 then
+                        -- 몰아서: 새로 읽으라고만 한다 (확인은 끝난 뒤 read 로 한꺼번에)
+                        refresh (first file track of library playlist 1 whose persistent ID is pid)
+                    else
+                        if mode is "read" then
+                            -- 찾기와 제목·앨범·위치를 Music 에 한 번만 묻는다 (따로 물으면 곡마다 네 번)
+                            set r to properties of (first file track of library playlist 1 whose persistent ID is pid)
+                        else
+                            set t to first file track of library playlist 1 whose persistent ID is pid
+                            set wantName to item (k + 1) of args
+                            set wantAlbum to item (k + 2) of args
+                            refresh t
+                            set lastLoc to ""
+                            set steady to 0
+                            set seenTick to 0
+                            set usedTick to maxTicks
+                            repeat with tick from 1 to maxTicks
+                                delay 0.1
+                                set curLoc to ""
+                                try
+                                    set curLoc to POSIX path of (get location of t)
+                                end try
+                                if curLoc is not "" and curLoc is lastLoc and (my fileExists(curLoc)) then
+                                    set steady to steady + 1
+                                else
+                                    set steady to 0
+                                end if
+                                set lastLoc to curLoc
+                                set isMatch to (wantName is "" and wantAlbum is "") or ((name of t as text) is wantName and (album of t as text) is wantAlbum)
+                                if isMatch and seenTick is 0 then set seenTick to tick
+                                if tick >= minTicks and steady >= 2 and isMatch then
+                                    set usedTick to tick
+                                    exit repeat
+                                end if
+                            end repeat
+                            -- 진단: 새 정보가 보인 시점 · 다음 곡으로 넘어간 시점 (칸 = 0.1초)
+                            my emitLine("LOCALTAG_TIMING:" & pid & tab & seenTick & tab & usedTick & tab & (name of t as text) & tab & (album of t as text))
+                            set r to properties of t
+                        end if
+                        set loc to ""
+                        try
+                            set loc to POSIX path of (location of r)
+                        end try
+                        my emitLine("LOCALTAG_INFO:" & pid & tab & (name of r as text) & tab & (album of r as text) & tab & loc)
                     end if
-                    set loc to ""
-                    try
-                        set loc to POSIX path of (get location of t)
-                    end try
-                    set infoLine to pid & tab & (name of t as text) & tab & (album of t as text) & tab & loc
                 end timeout
-                log "LOCALTAG_INFO:" & infoLine
             on error errText number errNum
                 if errNum is -1743 then error errText number errNum
-                log "LOCALTAG_INFO:" & pid & tab & "" & tab & "" & tab & "" & tab & "error " & errNum
+                my emitLine("LOCALTAG_INFO:" & pid & tab & "" & tab & "" & tab & "" & tab & "error " & errNum)
             end try
             set i to i + 1
-            log "LOCALTAG_PROGRESS:" & i
+            my emitLine("LOCALTAG_PROGRESS:" & i)
         end repeat
     end tell
     return "DONE"
@@ -629,6 +677,12 @@ def refresh(paths, progress=lambda *_: None, cancelled=lambda: False, expected=N
                             idle_limit=240 + max_wait)
         if rnd == 0:
             continue  # 새로 읽기 직후 정보는 아직 옛것일 수 있으므로 확인은 다음 단계에서
+        if mode == "refresh" and max_wait <= 0:
+            # 몰아서 다시 반영한 곡은 정보 줄이 없으므로 잠시 뒤 따로 확인한다
+            time.sleep(1.5)
+            lines = _run_script(ID_SCRIPT, ["read", *ids],
+                                lambda n, total=len(ids): progress(n, total, f"Music에 반영됐는지 확인하는 중 ({n}/{total})"),
+                                cancelled)
         if rnd >= 2:
             res.retried += len(ids)
         info = {p[0]: p for p in _tagged(lines, "LOCALTAG_INFO:") if p}

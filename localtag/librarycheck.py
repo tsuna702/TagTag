@@ -94,6 +94,40 @@ def read_library() -> list[LibTrack]:
         o.lib.objc_autoreleasePoolPop(pool)
 
 
+def library_ids() -> dict:
+    """{파일 경로(NFC): persistent ID} — 보관함의 위치와 ID 만 한 번에 읽는다 (Music 에 스크립트를 보내지 않음).
+
+    저장 전에 곡 ID 를 찾는 데 쓴다. 보관함 파일을 읽으므로 막 추가하거나 옮겨진 곡은 아직 옛 정보일 수 있다.
+    권한이 없으면 권한 창을 띄우지 않고 빈 dict.
+    """
+    from . import music
+    if music.media_library_status() != "granted":
+        return {}
+    o = music._bridge()
+    ctypes.cdll.LoadLibrary("/System/Library/Frameworks/iTunesLibrary.framework/iTunesLibrary")
+    o.lib.objc_autoreleasePoolPush.restype = ctypes.c_void_p
+    o.lib.objc_autoreleasePoolPop.argtypes = [ctypes.c_void_p]
+    pool = o.lib.objc_autoreleasePoolPush()
+    try:
+        err = ctypes.c_void_p()
+        lib = o.send(o.cls("ITLibrary"), "libraryWithAPIVersion:error:", o.nsstr("1.0"), ctypes.byref(err),
+                     argtypes=[ctypes.c_void_p, ctypes.c_void_p])
+        if not lib:
+            return {}
+        out = {}
+        for it in o.array(o.send(lib, "allMediaItems")):
+            if o.send(it, "locationType", restype=ctypes.c_long) != FILE:
+                continue
+            url = o.send(it, "location")
+            path = o.pystr(o.send(url, "path")) if url else None
+            if path:
+                pid = o.send(o.send(it, "persistentID"), "unsignedLongLongValue", restype=ctypes.c_ulonglong)
+                out[unicodedata.normalize("NFC", path)] = f"{pid:016X}"
+        return out
+    finally:
+        o.lib.objc_autoreleasePoolPop(pool)
+
+
 # ------------------------------------------------------------------ 점검
 
 def _norm(s: str) -> str:
