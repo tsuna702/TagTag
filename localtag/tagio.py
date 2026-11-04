@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 
 import mutagen
 
-from .safewrite import rewind, safe_modify
+from .safewrite import CHUNK, IS_WIN, rewind, safe_modify
 from mutagen.aiff import AIFF
 from mutagen.apev2 import APEBinaryValue, APEv2File
 from mutagen.asf import ASF, ASFByteArrayAttribute
@@ -31,6 +31,8 @@ from mutagen.ogg import OggFileType
 from mutagen.trueaudio import TrueAudio
 from mutagen.wave import WAVE
 
+import mutagen._util as _mutagen_util
+import mutagen.id3._tags as _id3_tags
 import mutagen.mp4 as _mutagen_mp4
 
 _mp4_sort_key = _mutagen_mp4._item_sort_key
@@ -45,6 +47,42 @@ def _item_sort_key(key, value):
 
 
 _mutagen_mp4._item_sort_key = _item_sort_key
+
+
+class _Tail:
+    """bytes 의 뒷부분을 복사하지 않고 가리킨다 (read_frames 가 쓰는 만큼만: 앞뒤를 정한 조각은 bytes, 뒤가 열린 조각은 또 _Tail)."""
+    __slots__ = ("data", "at")
+
+    def __init__(self, data, at=0):
+        self.data, self.at = data, at
+
+    def __len__(self):
+        return max(0, len(self.data) - self.at)  # 프레임 크기가 태그를 넘어가면 (잘린 파일) 뒤가 없다
+
+    def __getitem__(self, s):
+        if s.stop is None:
+            return _Tail(self.data, self.at + (s.start or 0))
+        return self.data[self.at + (s.start or 0):self.at + s.stop]
+
+
+_read_frames = _id3_tags.read_frames
+
+
+def _read_frames_fast(id3, data, frames):
+    # mutagen 은 ID3 프레임을 하나 읽을 때마다 남은 태그 전체를 복사한다 (data = data[10 + size:]). 커버가 뒤에 있으면
+    # 곡마다 커버 크기 × 프레임 수만큼 복사하는 셈이다 (MP3 를 읽는 시간의 3분의 1). 복사하지 않는 _Tail 을 넘긴다.
+    if id3.f_unsynch:
+        return _read_frames(id3, data, frames)
+    result, unknown, rest = _read_frames(id3, _Tail(data), frames)
+    return result, unknown, rest.data[rest.at:]  # 남은 부분은 bytes 로 (챕터 프레임 안의 프레임을 읽을 때 쓰인다)
+
+
+_id3_tags.read_frames = _read_frames_fast
+
+if IS_WIN:  # 오디오를 옮길 때도 CHUNK 크기로 (safewrite.CHUNK 참고)
+    for _fn in (_mutagen_util.resize_file, _mutagen_util.move_bytes, _mutagen_util.insert_bytes, _mutagen_util.delete_bytes):
+        if _fn.__defaults__ == (_mutagen_util._DEFAULT_BUFFER_SIZE,):
+            _fn.__defaults__ = (CHUNK,)
 
 # 공통 필드 (Mp3tag 기본 태그 패널과 같은 구성)
 FIELDS = [
@@ -96,6 +134,67 @@ def field_key(name: str) -> str:
         return c
     n = name.strip().upper()
     return EXT_ALIASES.get(n, n)
+
+
+_file_options = None
+_BY_EXT = {".mp3": MP3, ".flac": FLAC, ".m4a": MP4, ".m4b": MP4, ".m4r": MP4, ".mp4": MP4}
+
+
+def _mf(target):
+    """mutagen.File 과 같다. 형식 목록을 한 번만 만들어 넘긴다 — 넘기지 않으면 부를 때마다 import 문 20여 개를 실행하는데,
+    PySide6 가 import 를 가로채므로 곡마다 0.1 ms 가까이 든다. 확장자와 내용이 맞는 흔한 형식은 형식마다 점수 매기는 일도 건너뛴다
+    (mutagen.File 도 같은 형식을 고른다)."""
+    if not isinstance(target, str):
+        kind = _BY_EXT.get(os.path.splitext(target.name)[1].lower())
+        if kind is not None:
+            head = target.read(8)
+            target.seek(0)
+            if (head[:4] == b"fLaC" if kind is FLAC
+                    else head[4:8] == b"ftyp" if kind is MP4
+                    else head[:3] == b"ID3" or head[:2] in (b"\xff\xf2", b"\xff\xf3", b"\xff\xfa", b"\xff\xfb")):
+                return kind(target)
+    return mutagen.File(target, options=_file_formats())
+
+
+def _file_formats() -> list:
+    global _file_options
+    if _file_options is None:
+        from mutagen.aac import AAC
+        from mutagen.ac3 import AC3
+        from mutagen.dsdiff import DSDIFF
+        from mutagen.id3 import ID3FileType
+        from mutagen.monkeysaudio import MonkeysAudio
+        from mutagen.musepack import Musepack
+        from mutagen.oggflac import OggFLAC
+        from mutagen.oggopus import OggOpus
+        from mutagen.oggspeex import OggSpeex
+        from mutagen.oggtheora import OggTheora
+        from mutagen.oggvorbis import OggVorbis
+        from mutagen.optimfrog import OptimFROG
+        from mutagen.smf import SMF
+        from mutagen.tak import TAK
+        from mutagen.wavpack import WavPack
+        _file_options = [MP3, TrueAudio, OggTheora, OggSpeex, OggVorbis, OggFLAC, FLAC, AIFF, APEv2File, MP4,
+                         ID3FileType, WavPack, Musepack, MonkeysAudio, OptimFROG, ASF, OggOpus, AAC, AC3, SMF, TAK,
+                         DSF, DSDIFF, WAVE]
+    return _file_options
+
+
+# 태그가 남는 자리(패딩)보다 커지면 오디오를 통째로 옮겨 곡 전체를 다시 써야 한다 (곡당 수십 ms). 그래서 그때 자리를 넉넉히 만들어
+# 다음 저장부터는 옮기지 않게 하고, 남는 자리는 줄이지 않는다 (줄이면 그때도 오디오를 옮긴다).
+def _slack(size: int) -> int:
+    return max(32 * 1024, min(256 * 1024, size // 100))
+
+
+def _pad_keep(info) -> int:
+    """태그만 바꿀 때·되돌릴 때."""
+    return info.padding if info.padding >= 0 else _slack(info.size)
+
+
+def _pad_cover(info) -> int:
+    """커버를 바꿀 때: 커버를 줄이면 파일도 줄어들게, 많이 남으면 줄인다."""
+    slack = _slack(info.size)
+    return slack if info.padding < 0 or info.padding > 2 * slack else info.padding
 
 
 # 여러 값을 가진 필드를 한 줄로 표시할 때 쓰는 구분자 (Mp3tag과 동일)
@@ -814,8 +913,25 @@ class AudioFile:
     # ---- 읽기
     @classmethod
     def load(cls, path: str, opts: Options) -> "AudioFile":
+        if not isinstance(path, str):  # 메모리 작업 사본 (저장 검증) — 경로·파일 정보는 _adopt 가 원본 것으로 채운다
+            af = cls(path=path.name)
+            af.size = path.length()
+            return af._read(rewind(path), opts)
         try:
-            mf = mutagen.File(rewind(path))
+            f = open(path, "rb")
+        except OSError as e:
+            raise UnsupportedFile(str(e)) from e
+        with f:  # 곡마다 한 번만 연다 (파일 정보도 ID3v1 확인도 이 파일로)
+            st = os.fstat(f.fileno())
+            af = cls(path=path)
+            af.size, af.mtime, af.btime = st.st_size, st.st_mtime, _birthtime(st)
+            af.dev, af.ino = st.st_dev, st.st_ino
+            return af._read(f, opts)
+
+    def _read(self, target, opts: Options) -> "AudioFile":
+        af = self
+        try:
+            mf = _mf(target)
         except Exception as e:
             raise UnsupportedFile(str(e)) from e
         if mf is None:
@@ -823,15 +939,7 @@ class AudioFile:
         kind = _kind(mf)
         if kind == "unknown":
             raise UnsupportedFile(type(mf).__name__)
-
-        if isinstance(path, str):
-            af = cls(path=path)
-            st = os.stat(path)
-            af.size, af.mtime, af.btime = st.st_size, st.st_mtime, _birthtime(st)
-            af.dev, af.ino = st.st_dev, st.st_ino
-        else:  # 메모리 작업 사본 (저장 검증) — 경로·파일 정보는 _adopt 가 원본 것으로 채운다
-            af = cls(path=path.name)
-            af.size = len(path.getbuffer())
+        mf.filename = mf.filename or af.path
         info = mf.info
         af.length = float(getattr(info, "length", 0) or 0)
         af.bitrate = int(getattr(info, "bitrate", 0) or 0)
@@ -849,7 +957,7 @@ class AudioFile:
                 af.tags, af.pictures = _id3_read(tags, opts)
                 major = tags.version[1] if tags.version[0] == 2 else 0
                 parts = [f"ID3v2.{major}"] if major else []
-                if _has_id3v1(path) or tags.version[0] == 1:
+                if _has_id3v1(target) or tags.version[0] == 1:
                     parts.append("ID3v1")
                 af.tag_type = ", ".join(parts)
         elif kind == "mp4":
@@ -891,13 +999,15 @@ class AudioFile:
             snapshot.append(_snapshot_of(mf, path, (st.st_atime, st.st_mtime)))
         return hook
 
-    def save(self, changes: dict, pictures: list | None, opts: Options, snapshot: list | None = None) -> "AudioFile":
+    def save(self, changes: dict, pictures: list | None, opts: Options, snapshot: list | None = None,
+             before_move=None) -> "AudioFile":
         """changes: {필드: [값...]} (빈 리스트는 삭제). pictures: None이면 커버 변경 없음.
-        snapshot 에 목록을 주면 바꾸기 전 태그(실행 취소용)를 담아 준다."""
+        snapshot 에 목록을 주면 바꾸기 전 태그(실행 취소용)를 담아 준다. before_move: safe_modify 참고."""
         hook = self._snapshot_hook(snapshot)
+        pad = _pad_keep if pictures is None else _pad_cover
 
         def write(path):
-            mf = mutagen.File(rewind(path))
+            mf = _mf(rewind(path))
             hook(mf, path)
             before = _info_length(mf)
             kind = _kind(mf)
@@ -910,19 +1020,19 @@ class AudioFile:
                 if v2 == 3:
                     _to_v23(tags)
                 if isinstance(mf, (MP3, TrueAudio)):
-                    tags.save(rewind(path), v1=2 if opts.write_id3v1 else 1, v2_version=v2)
+                    tags.save(rewind(path), v1=2 if opts.write_id3v1 else 1, v2_version=v2, padding=pad)
                 else:
                     mf.save(rewind(path), v2_version=v2)
             elif kind == "mp4":
                 _mp4_write(tags, changes, pictures)
-                mf.save(rewind(path))
+                mf.save(rewind(path), padding=pad)
             elif kind == "flac":
                 _vorbis_write(tags, changes)
                 if pictures is not None:
                     mf.clear_pictures()
                     for p in pictures:
                         mf.add_picture(_flac_pic(p))
-                mf.save(rewind(path))
+                mf.save(rewind(path), padding=pad)
             elif kind == "ogg":
                 _vorbis_write(tags, changes)
                 if pictures is not None:
@@ -939,16 +1049,16 @@ class AudioFile:
             return before
 
         return self._saved(safe_modify(self.path, write, opts.safe_save, opts.keep_mtime,
-                                       inspect=lambda p: AudioFile.load(p, opts)), opts)
+                                       inspect=lambda p: AudioFile.load(p, opts), before_move=before_move), opts)
 
     def _saved(self, af, opts: Options) -> "AudioFile":
         return _adopt(af, self.path, opts)
 
-    def remove_tags(self, opts: Options, snapshot: list | None = None) -> "AudioFile":
+    def remove_tags(self, opts: Options, snapshot: list | None = None, before_move=None) -> "AudioFile":
         hook = self._snapshot_hook(snapshot)
 
         def write(path):
-            mf = mutagen.File(rewind(path))
+            mf = _mf(rewind(path))
             hook(mf, path)
             before = _info_length(mf)
             kind = _kind(mf)
@@ -968,7 +1078,7 @@ class AudioFile:
             return before
 
         return self._saved(safe_modify(self.path, write, opts.safe_save, opts.keep_mtime,
-                                       inspect=lambda p: AudioFile.load(p, opts)), opts)
+                                       inspect=lambda p: AudioFile.load(p, opts), before_move=before_move), opts)
 
     def path_for_stem(self, new_stem: str) -> str:
         """같은 폴더에서 확장자는 그대로 두고 이름만 바꾼 경로."""
@@ -1079,7 +1189,7 @@ def _blob_size(blobs, seen):
 
 def take_snapshot(path: str) -> Snapshot:
     st = os.stat(path)
-    return _snapshot_of(mutagen.File(rewind(path)), path, (st.st_atime, st.st_mtime))
+    return _snapshot_of(_mf(rewind(path)), path, (st.st_atime, st.st_mtime))
 
 
 def _snapshot_of(mf, path: str, times) -> Snapshot:
@@ -1126,16 +1236,23 @@ def _adopt(af, path: str, opts: Options) -> AudioFile:
     return af
 
 
-def restore_snapshot(path: str, snap: Snapshot, safe: bool = True, opts: Options | None = None):
-    """스냅샷의 태그로 되돌린다. opts 를 주면 되돌린 파일을 읽은 AudioFile 을 돌려준다."""
-    af = safe_modify(path, lambda p: _restore_into(p, snap), safe,
-                     inspect=(lambda p: AudioFile.load(p, opts)) if opts else None)
+def restore_snapshot(path: str, snap: Snapshot, safe: bool = True, opts: Options | None = None,
+                     capture: list | None = None):
+    """스냅샷의 태그로 되돌린다. opts 를 주면 되돌린 파일을 읽은 AudioFile 을 돌려준다.
+    capture 에 목록을 주면 되돌리기 직전 상태의 스냅샷을 (같은 파일 읽기로) 담아 준다 — 다시 실행용."""
+    def write(p):
+        return _restore_into(p, snap, path, capture)
+
+    af = safe_modify(path, write, safe, inspect=(lambda p: AudioFile.load(p, opts)) if opts else None)
     os.utime(path, (snap.atime, snap.mtime))
     return _adopt(af, path, opts) if opts else None
 
 
-def _restore_into(path: str, snap: Snapshot):
-    mf = mutagen.File(rewind(path))
+def _restore_into(path: str, snap: Snapshot, orig: str, capture: list | None = None):
+    mf = _mf(rewind(path))
+    if capture is not None:
+        st = os.stat(orig)  # 시각은 작업 사본이 아니라 원본의 것 (아직 바뀌기 전)
+        capture.append(_snapshot_of(mf, path, (st.st_atime, st.st_mtime)))
     before = _info_length(mf)
     kind = snap.kind
     if kind == "id3":
@@ -1152,7 +1269,7 @@ def _restore_into(path: str, snap: Snapshot):
             if v2 == 3:
                 _to_v23(tags)
             if is_mp3:
-                tags.save(rewind(path), v1=2 if snap.had_v1 else 0, v2_version=v2)
+                tags.save(rewind(path), v1=2 if snap.had_v1 else 0, v2_version=v2, padding=_pad_keep)
             else:
                 mf.tags = tags
                 mf.save(rewind(path), v2_version=v2)
@@ -1166,7 +1283,7 @@ def _restore_into(path: str, snap: Snapshot):
         mf.clear_pictures()
         for p in pics:
             mf.add_picture(copy.deepcopy(p))
-        mf.save(rewind(path))
+        mf.save(rewind(path), padding=_pad_keep)
     elif kind in ("ogg", "asf"):
         if mf.tags is None:
             mf.add_tags()
@@ -1185,5 +1302,8 @@ def _restore_into(path: str, snap: Snapshot):
             for k, v in snap.data.items():
                 mf.tags[k] = ([MP4Cover(c.data, c.imageformat) for c in v] if kind == "mp4" and k == "covr"
                               else copy.deepcopy(v))
-            mf.save(rewind(path))
+            if kind == "mp4":
+                mf.save(rewind(path), padding=_pad_keep)
+            else:
+                mf.save(rewind(path))
     return before

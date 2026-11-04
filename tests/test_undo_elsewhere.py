@@ -5,6 +5,7 @@
 """
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from harness import QApplication, check, finish, samples, window  # noqa: E402
@@ -39,6 +40,7 @@ def save():
 
 
 def music_edit(name, title):
+    time.sleep(0.03)  # 저장과 같은 시각으로 찍히지 않게 (Windows 는 15 ms 단위)
     mf = mutagen.File(os.path.join(album, name), easy=True)
     mf["title"] = [title]
     mf.save()

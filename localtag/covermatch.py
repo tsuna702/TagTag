@@ -10,6 +10,7 @@ import difflib
 import os
 import re
 import unicodedata
+from functools import lru_cache
 
 from PySide6.QtCore import QBuffer, QByteArray, QEvent, QIODevice, QSize, Qt
 from PySide6.QtGui import QIcon, QImageReader, QPixmap
@@ -27,6 +28,7 @@ SIZES = [0, 500, 600, 1000]
 SIZE_LABELS = ["원본", "500×500", "600×600", "1000×1000"]
 
 
+@lru_cache(maxsize=8192)  # 같은 이름을 곡·트랙 짝마다 다시 비교한다
 def norm(s: str) -> str:
     s = unicodedata.normalize("NFKC", s).casefold()
     s = re.sub(r"\((?:\d+kbit_\w+|bq|hq|mq|sd|maxres)\)", " ", s)   # JDownloader 꼬리말

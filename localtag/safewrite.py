@@ -1,7 +1,7 @@
 """안전 저장: 사본에 쓰고 검증한 뒤 원본에 반영한다 (앨범태그 core.py 방식).
 
 - 사본은 같은 APFS 디스크면 복제본(clone)으로 만들어 즉시 끝난다
-  (Windows 는 메모리에 둔다 — 디스크에 새로 만든 파일은 열 때마다 백신 검사로 느려진다)
+  (Windows 는 메모리에 둔다 — 쓴 부분만 메모리에 두고 나머지는 원본에서 읽는다. 곡 크기와 상관없이 태그 부분만 읽는다)
 - 원본에는 달라진 부분만 다시 쓴다 (파일 번호 유지). 오디오 데이터(MP3 프레임, FLAC 프레임, M4A mdat)의
   위치가 그대로면 원본의 오디오는 읽지도 쓰지도 않고 태그 부분만 비교해 다시 쓴다 (곡당 수 MB → 수백 KB).
   태그가 커져 오디오가 뒤로 밀렸으면 오디오 데이터가 바이트 단위로 같은지 확인한 뒤 다시 쓴다
@@ -11,20 +11,21 @@
 from __future__ import annotations
 
 import contextlib
-import ctypes
-import io
 import os
 import shutil
 import stat
 import struct
-import subprocess
 import sys
+import threading
 import uuid
 
 import mutagen
 
 IS_MAC = sys.platform == "darwin"
 IS_WIN = sys.platform == "win32"
+if IS_MAC:  # 맥에서만 쓴다 (Windows 는 앱이 켜지는 시간을 아낀다)
+    import ctypes
+    import subprocess
 
 SF_DATALESS = 0x40000000  # iCloud 등에 있고 아직 내려받지 않은 파일
 RECALL_ON_DATA_ACCESS = 0x400000  # Windows: OneDrive "온라인 전용" 파일
@@ -44,18 +45,171 @@ else:  # Windows 에는 pread/pwrite 가 없다 — 한 fd 를 한 스레드에�
         os.lseek(fd, off, os.SEEK_SET)
         return os.write(fd, data)
 
-# Windows 는 작업 사본을 메모리에 둔다: 디스크에 새로 만든 파일은 열 때마다 백신(Defender)이 검사해
-# 곡마다 몇 ms 씩 든다 (300곡 저장 6.6초 중 약 3초). 이보다 큰 파일은 예전처럼 디스크 사본.
+# Windows 는 작업 사본을 메모리에 둔다: 디스크에 새로 만든 파일은 열 때마다 백신(Defender)이 검사해 곡마다 몇 ms 씩 들고,
+# NTFS 에는 복제본(clone)이 없어 파일을 통째로 복사해야 한다. 메모리 사본에 쓴 양이 이보다 커지면 디스크 사본으로 다시 한다
+# (태그가 커져 아주 큰 파일의 오디오를 옮겨야 할 때뿐이다).
 MEM_STAGE = IS_WIN
 MEM_STAGE_LIMIT = 256 * 1024 * 1024
+PAGE = 64 * 1024
+READ_AHEAD = 128 * 1024  # 작은 읽기가 이어지므로 원본에서 이만큼 앞서 읽어 둔다
 
 
-class MemStage(io.BytesIO):
-    """메모리에 둔 작업 사본. name 은 원본 경로 (확장자로 형식을 가린다)."""
+def _pread_full(fd, n, off) -> bytes:
+    data = _pread(fd, n, off)
+    if len(data) == n or not data:
+        return data
+    parts, got = [data], len(data)
+    while got < n:
+        more = _pread(fd, n - got, off + got)
+        if not more:
+            break
+        parts.append(more)
+        got += len(more)
+    return b"".join(parts)
 
-    def __init__(self, data: bytes, name: str):
-        super().__init__(data)
+
+class StageTooBig(Exception):
+    """메모리 사본에 쓴 양이 MEM_STAGE_LIMIT 를 넘었다."""
+
+
+class MemStage:
+    """메모리에 둔 작업 사본 (copy-on-write): 원본은 읽기만 하고 쓴 부분만 메모리에 둔다. 태그만 바꾸면 곡이 아무리 커도
+    태그 부분만 읽는다. mutagen 이 쓰는 파일 객체처럼 동작하고 원본은 고치지 않는다.
+    base: 내용(bytes) 또는 읽기로 연 원본의 fd (over 로 연다). name 은 원본 경로 (확장자로 형식을 가린다)."""
+
+    def __init__(self, base, name: str, size: int | None = None):
         self.name = name
+        self._data, self._fd = (base, None) if isinstance(base, (bytes, bytearray)) else (None, base)
+        self._base_size = len(base) if self._fd is None else size  # 잘라 내면 줄어든다 (그 뒤쪽은 0 으로 읽힌다)
+        self._size = self._base_size
+        self._pos = 0
+        self._pages: dict[int, bytearray] = {}  # 쓴 부분 (쪽 번호 → PAGE 바이트)
+        self._win_off, self._win = 0, b""
+
+    @classmethod
+    def over(cls, path: str) -> "MemStage":
+        fd = os.open(path, os.O_RDONLY | O_BINARY)
+        try:
+            return cls(fd, path, os.fstat(fd).st_size)
+        except BaseException:
+            os.close(fd)
+            raise
+
+    def close(self):
+        """원본을 닫는다. Windows 는 열려 있는 파일의 이름을 바꾸거나 교체할 수 없다."""
+        if self._fd is not None:
+            os.close(self._fd)
+            self._fd = None
+
+    def length(self) -> int:
+        return self._size
+
+    def _base(self, off, n) -> bytes:
+        """원본의 off 부터 최대 n 바이트."""
+        n = min(n, self._base_size - off)
+        if n <= 0:
+            return b""
+        if self._fd is None:
+            return bytes(self._data[off:off + n])
+        i = off - self._win_off
+        if i >= 0 and i + n <= len(self._win):
+            return self._win[i:i + n]
+        if n >= READ_AHEAD:
+            return _pread_full(self._fd, n, off)
+        self._win, self._win_off = _pread_full(self._fd, READ_AHEAD, off), off
+        return self._win[:n]
+
+    def pread(self, n, off) -> bytes:
+        """off 부터 최대 n 바이트 (현재 위치는 그대로)."""
+        n = min(n, self._size - off)
+        if n <= 0:
+            return b""
+        pages = self._pages
+        if not pages:
+            data = self._base(off, n)
+            return data if len(data) == n else data + bytes(n - len(data))
+        parts, end = [], off + n
+        while off < end:
+            i = off // PAGE
+            page = pages.get(i)
+            if page is not None:
+                stop = min(end, (i + 1) * PAGE)
+                parts.append(page[off - i * PAGE:stop - i * PAGE])
+            else:  # 쓰지 않은 쪽이 이어지면 원본에서 한 번에
+                j = i + 1
+                while j * PAGE < end and j not in pages:
+                    j += 1
+                stop = min(end, j * PAGE)
+                data = self._base(off, stop - off)
+                parts.append(data)
+                if len(data) != stop - off:
+                    parts.append(bytes(stop - off - len(data)))
+            off = stop
+        return b"".join(parts)
+
+    def read(self, n=-1) -> bytes:
+        data = self.pread(self._size if n is None or n < 0 else n, self._pos)
+        self._pos += len(data)
+        return data
+
+    def write(self, b) -> int:
+        n = len(b)
+        if not n:
+            return 0
+        off, end, data = self._pos, self._pos + n, memoryview(b)
+        pages, src = self._pages, 0
+        while off < end:
+            i, at = off // PAGE, off % PAGE
+            k = min(PAGE - at, end - off)
+            page = pages.get(i)
+            if page is None:
+                if len(pages) * PAGE >= MEM_STAGE_LIMIT:
+                    raise StageTooBig
+                if k == PAGE:  # 한 쪽 전체를 덮어쓰면 원본을 읽을 필요가 없다
+                    pages[i] = bytearray(data[src:src + k])
+                    src, off = src + k, off + k
+                    continue
+                page = pages[i] = bytearray(self._base(i * PAGE, PAGE)).ljust(PAGE, b"\0")
+            page[at:at + k] = data[src:src + k]
+            src, off = src + k, off + k
+        self._pos = end
+        self._size = max(self._size, end)
+        return n
+
+    def seek(self, off, whence=0) -> int:
+        pos = off + (self._pos if whence == 1 else self._size if whence == 2 else 0)
+        if pos < 0:
+            raise OSError(22, "Invalid argument")  # 실제 파일처럼
+        self._pos = pos
+        return pos
+
+    def tell(self) -> int:
+        return self._pos
+
+    def truncate(self, size=None) -> int:
+        size = self._pos if size is None else size
+        if size < self._size:
+            self._base_size = min(self._base_size, size)
+            i = size // PAGE
+            page = self._pages.get(i)
+            if page is not None:  # 다시 늘어나면 잘린 부분은 0 으로 읽혀야 한다
+                page[size - i * PAGE:] = bytes(PAGE - (size - i * PAGE))
+            for j in [j for j in self._pages if j > i]:
+                del self._pages[j]
+        self._size = size
+        return size
+
+    def flush(self):
+        pass
+
+    def readable(self):
+        return True
+
+    def writable(self):
+        return True
+
+    def seekable(self):
+        return True
 
 
 def rewind(target):
@@ -102,7 +256,8 @@ def is_dataless(path: str) -> bool:
                 or getattr(st, "st_file_attributes", 0) & RECALL_ON_DATA_ACCESS)
 
 
-CHUNK = 1024 * 1024
+# Windows 는 1MB 넘게 메모리를 잡을 때마다 새 쪽을 받느라(VirtualAlloc) 느리다 — 256KB 로 나누면 읽어 비교하는 속도가 2배가 넘는다
+CHUNK = 256 * 1024 if IS_WIN else 1024 * 1024
 
 # copyfile(3): cp -p 처럼 확장 속성(Finder 태그 등)·ACL·시각까지 복사한다.
 # COPYFILE_CLONE 이면 APFS에서는 데이터를 복사하지 않는 복제본(clone)을 만들어 즉시 끝나고 공간도 쓰지 않는다
@@ -146,6 +301,83 @@ def _fsync(path: str):
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+# Windows 에서 파일을 많이 저장할 때: 바뀐 지 얼마 안 된 파일을 처음 열면 백신이 검사하느라 곡당 5~10 ms, fsync 도 곡당 2~7 ms 가
+# 걸리는데 (거의 기다리는 시간) 여러 개를 동시에 하면 곡당 0.5~1 ms 로 줄어든다. 그래서 묶음으로 처리한다.
+IO_WORKERS = 16
+_local = threading.local()
+_pool = None
+
+
+def _parallel(fn, items):
+    """I/O 만 하는 fn 을 여러 스레드로 (기다리는 동안 파이썬을 붙잡지 않으므로 함께 진행된다). 끝날 때까지 기다린다.
+    스레드는 한 번 만들어 계속 쓴다 (묶음마다 만들면 곡당 0.1 ms 쯤 든다)."""
+    global _pool
+    if len(items) < 2:
+        for x in items:
+            fn(x)
+        return
+    if _pool is None:
+        from concurrent.futures import ThreadPoolExecutor  # 앱이 켜지는 데 시간이 들어 필요할 때 부른다
+        _pool = ThreadPoolExecutor(IO_WORKERS, thread_name_prefix="localtag-io")
+    list(_pool.map(fn, items))
+
+
+def prewarm(paths):
+    """Windows: 파일들을 미리 한 번씩 동시에 열어 백신 검사를 끝내 둔다. 끝난 뒤에는 어느 파일도 열려 있지 않다
+    (열려 있으면 이름을 바꿀 수 없다). 다른 운영체제에서는 아무것도 하지 않는다."""
+    if not IS_WIN or len(paths) < 2:
+        return
+
+    def one(p):
+        try:
+            os.close(os.open(p, os.O_RDONLY | O_BINARY))
+        except OSError:
+            pass  # 실제로 쓸 때 알린다
+
+    _parallel(one, paths)
+
+
+class IoBatch:
+    """파일을 묶음으로 저장한다: with 안에서 이 스레드의 write_back 은 fsync 를 미루고, next(다음 묶음 경로) 를 부르면
+    앞 묶음을 한꺼번에 디스크에 확정한 뒤 다음 묶음을 미리 열어 둔다 (prewarm). with 를 나갈 때 나머지를 확정한다.
+    다른 운영체제에서는 예전처럼 곡마다 fsync 한다. errors: 확정하지 못한 [(경로, 이유)]."""
+
+    def __init__(self):
+        self.errors = []
+        self._pending = []
+
+    def __enter__(self):
+        if IS_WIN:
+            _local.pending = self._pending
+        return self
+
+    def __exit__(self, *_):
+        _local.pending = None
+        self.flush()
+
+    def next(self, paths):
+        self.flush()
+        prewarm(paths)
+
+    def moved(self, old, new):
+        """미뤄 둔 파일의 이름을 바꿨다."""
+        self._pending[:] = [new if p == old else p for p in self._pending]
+
+    def flush(self):
+        paths = list(dict.fromkeys(self._pending))
+        self._pending.clear()
+
+        def one(p):
+            try:
+                _fsync(p)
+            except (FileNotFoundError, PermissionError):
+                pass  # 그사이 옮겨졌거나 다른 프로그램이 열었다 — 쓴 내용은 이미 시스템에 넘어갔다
+            except OSError as e:
+                self.errors.append((p, f"디스크에 확정하지 못했습니다: {e}"))
+
+        _parallel(one, paths)
 
 
 def _reader(target):
@@ -262,12 +494,13 @@ IN_USE = "다른 프로그램(플레이어 등)이 파일을 사용 중이라 �
 
 def error_text(e: Exception) -> str:
     """사용자에게 보일 오류 문구. Windows 공유 위반(백업·이름 바꾸기 등 어디서 나든)은 알기 쉬운 말로."""
-    if getattr(e, "winerror", 0) == 32:
+    # open()·os.open() 은 공유 위반을 errno 13 으로만 알린다 (winerror 없음) — 읽기 전용 파일은 check_writable 이 따로 알린다
+    if IS_WIN and isinstance(e, PermissionError) and getattr(e, "winerror", None) in (None, 32):
         return IN_USE
     return str(e)
 
 
-def safe_modify(path: str, fn, enabled: bool = True, keep_mtime: bool = False, inspect=None):
+def safe_modify(path: str, fn, enabled: bool = True, keep_mtime: bool = False, inspect=None, before_move=None):
     """fn(작업할_경로)로 태그를 바꾼다. enabled면 사본에서 작업하고 검증 후 원본에 반영.
 
     작업 사본은 디스크 파일 경로이거나 (Windows) 메모리 사본(MemStage)이다 — fn·inspect 는
@@ -275,29 +508,42 @@ def safe_modify(path: str, fn, enabled: bool = True, keep_mtime: bool = False, i
     fn 이 바꾸기 전 재생 시간(초)을 돌려주면 그것을 쓰고, 아니면 따로 읽는다.
     inspect(경로) 가 있으면 바뀐 파일을 읽은 결과(.length 가 있는 객체)를 돌려준다 —
     검증에 쓴 것을 그대로 돌려주므로 저장 뒤 파일을 다시 읽지 않아도 된다.
+    before_move() 는 원본의 오디오까지 다시 쓰게 될 때(태그가 커져 오디오가 밀림) 쓰기 직전에 부른다.
     """
     st = check_writable(path)
     if not enabled:
+        if before_move:
+            before_move()
         fn(path)
         if keep_mtime:
             os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
         return inspect(path) if inspect else None
     folder, ext = os.path.dirname(path), os.path.splitext(path)[1]
-    stage = os.path.join(folder, f"{STAGE_PREFIX}{uuid.uuid4().hex}{ext}")
+    stage = None
     keep_stage = False
     result = None
+
+    def disk_stage():
+        nonlocal stage
+        stage = os.path.join(folder, f"{STAGE_PREFIX}{uuid.uuid4().hex}{ext}")
+        copy_preserving(path, stage)
+
     try:
         try:
-            if MEM_STAGE and st.st_size <= MEM_STAGE_LIMIT:
-                with open(path, "rb") as f:
-                    stage = MemStage(f.read(), path)
+            if MEM_STAGE:
+                stage = MemStage.over(path)
             else:
-                copy_preserving(path, stage)
+                disk_stage()
         except PermissionError as e:
-            if IS_WIN and getattr(e, "winerror", 0) == 32:  # 공유 위반: 다른 프로그램이 열어 둠
+            if IS_WIN:  # 공유 위반: 다른 프로그램이 열어 둠 (읽기 전용은 check_writable 이 이미 걸렀다)
                 raise SafeWriteError(IN_USE) from e
             raise
-        before_len = fn(stage)
+        try:
+            before_len = fn(stage)
+        except StageTooBig:  # 태그가 커져 아주 큰 파일의 오디오를 옮겨야 한다 → 디스크 사본으로 다시
+            stage.close()
+            disk_stage()
+            before_len = fn(stage)
         before_len = round(float(before_len), 2) if isinstance(before_len, (int, float)) else _length(path)
         if inspect:
             try:
@@ -326,6 +572,8 @@ def safe_modify(path: str, fn, enabled: bool = True, keep_mtime: bool = False, i
         now = os.stat(path)
         if (now.st_size, now.st_mtime_ns, now.st_ino) != (st.st_size, st.st_mtime_ns, st.st_ino):
             raise SafeWriteError("작업하는 동안 다른 프로그램이 파일을 바꿨습니다. 원본은 그대로입니다.")
+        if before_move and protect is None:
+            before_move()
         try:
             write_back(stage, path, protect, rewrite_rest=moved)
         except StageKeptError:
@@ -334,8 +582,11 @@ def safe_modify(path: str, fn, enabled: bool = True, keep_mtime: bool = False, i
         if keep_mtime:
             os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
     finally:
-        if isinstance(stage, str) and not keep_stage and os.path.exists(stage):
-            os.unlink(stage)
+        if isinstance(stage, str):
+            if not keep_stage and os.path.exists(stage):
+                os.unlink(stage)
+        elif stage is not None:
+            stage.close()
     return result
 
 
@@ -400,11 +651,9 @@ def write_back(src, dst: str, protect=None, rewrite_rest=False):
             return _pread(s, n, off)
     else:
         s = None
-        data = src.getvalue()
-        size = len(data)
-
-        def read_src(n, off):
-            return data[off:off + n]
+        size = src.length()
+        read_src = src.pread
+    pending = getattr(_local, "pending", None)  # IoBatch 안이면 fsync 는 묶음이 끝날 때 한꺼번에
     touched = False  # 원본에 쓰기 시작했는지
     try:
         try:
@@ -430,13 +679,16 @@ def write_back(src, dst: str, protect=None, rewrite_rest=False):
                             done += _pwrite(d, a[done:], off + done)
                     if os.fstat(d).st_size != size:
                         os.ftruncate(d, size)
-                    os.fsync(d)
+                    if pending is None:
+                        os.fsync(d)
                     # 쓴 부분을 다시 읽어 확인 (나머지는 쓰기 전에 같다는 것을 확인했다)
                     for off, n in chunks:
                         if _pread(d, n, off) != read_src(n, off):
                             raise SafeWriteError("덮어쓴 내용 확인에 실패했습니다.")
                     if os.fstat(d).st_size != size:
                         raise SafeWriteError("덮어쓴 파일 크기가 다릅니다.")
+                    if pending is not None:
+                        pending.append(dst)
                     return
                 except Exception:
                     pass  # 아래에서 사본으로 교체
@@ -455,13 +707,15 @@ def write_back(src, dst: str, protect=None, rewrite_rest=False):
         path = os.path.join(os.path.dirname(dst), f"{STAGE_PREFIX}{uuid.uuid4().hex}{os.path.splitext(dst)[1]}")
         try:
             with open(path, "xb") as f:
-                f.write(data)
+                for off in range(0, size, CHUNK):
+                    f.write(src.pread(CHUNK, off))
         except OSError as e:
             if os.path.exists(path):
                 os.unlink(path)
             msg = ("원본에 쓰다가 실패해 일부만 바뀌었을 수 있습니다. 백업에서 되돌려 주세요." if touched
                    else "원본을 다시 쓰지 못했습니다. 원본은 그대로입니다.")
             raise SafeWriteError(f"{msg}\n{e}") from e
+        src.close()  # 원본을 열어 둔 채로는 교체할 수 없다
         src = path
     try:
         _fsync(src)

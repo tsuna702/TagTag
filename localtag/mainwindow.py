@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 
 from PySide6.QtCore import QEvent, QItemSelection, QItemSelectionModel, QSettings, QStandardPaths, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QKeySequence
@@ -15,7 +15,6 @@ from PySide6.QtWidgets import (
 )
 
 from .actiondialogs import ActionEditDialog, ActionsDialog, PlansPreview, choose_action_type
-from . import music
 from .osutil import IS_MAC, IS_WIN, REVEAL_LABEL, keys, reveal
 from .tasks import run_task, stop_tasks
 from .backup import BackupStore
@@ -26,11 +25,25 @@ from .filterexpr import SCOPES as FILTER_SCOPES, FilterError, compile_filter
 from .model import COLUMN_WIDTHS, COLUMNS, FileModel, SortProxy, fmt_length, fmt_size
 from .panel import TagPanel, changes_for
 from .rowdrag import RowDragger, move_to
-from .plan import Plan, UndoEntry, UndoItem, state_diff, tag_state
-from .safewrite import error_text
+from .plan import Plan, UndoEntry, UndoItem, file_stamp, state_diff, tag_state
+from .safewrite import IoBatch, error_text, prewarm
 from .tagio import (
-    AUDIO_EXTS, FIELD_LABELS, AudioFile, Options, move_file, restore_snapshot, scan, take_snapshot,
+    AUDIO_EXTS, FIELD_LABELS, AudioFile, Options, _file_formats, move_file, restore_snapshot, scan,
 )
+
+if IS_MAC:
+    from . import music
+else:
+    class _MusicLater:
+        """Music 연동은 맥에서만 쓴다 — 다른 운영체제에서는 쓸 때만 불러온다 (앱이 켜지는 시간을 아낀다)."""
+        drag_has_music = staticmethod(lambda: False)
+        register_drop_types = staticmethod(lambda widget: False)
+
+        def __getattr__(self, name):
+            from . import music as real
+            return getattr(real, name)
+
+    music = _MusicLater()
 
 APP_NAME = "LocalTag"
 RELEASES_URL = "https://github.com/tsuna702/TagTag/releases"
@@ -75,17 +88,20 @@ def _app_icon():
 
 LOAD_WORKERS = 4
 LOAD_PROBE = 24  # 처음 이만큼은 차례로 읽어 보고 나머지를 동시에 읽을지 정한다
+LOAD_BATCH = 64
 PROGRESS_STEP = 0.05  # 진행 창은 이 간격(초)으로만 다시 그린다 (곡마다 그리면 그리는 데 더 걸린다)
 UNDO_LEVELS = 30
 UNDO_MEMORY = 512 * 1024 * 1024  # 실행 취소 기록이 이보다 커지면 오래된 것부터 버린다
-BACKUP_BATCH = 32  # 백업 기록을 이만큼씩 모아 디스크에 확정한다 (곡마다 fsync 하면 Windows 에서 곡당 약 2ms)
+BACKUP_BATCH = 32  # 곡을 이만큼씩 묶어 저장한다: 백업 기록을 모아 확정하고, Windows 는 파일 열기·fsync 를 한꺼번에 (safewrite.IoBatch)
 
 
 def _read_all(paths, load):
     """paths 를 차례로 load 한 결과. 처음 몇 곡을 읽는 동안 디스크를 기다리는 시간이 길면(외장 디스크·NAS)
     나머지는 여러 개를 동시에 읽는다. 내장 SSD 처럼 금방 읽히면 한 줄로 읽는다 — 파이썬은 한 번에 한 스레드만
-    돌아서 동시에 읽으면 오히려 느리다 (보관함 2,500곡: 한 줄 0.9초, 4개 동시 1.4초)."""
+    돌아서 동시에 읽으면 오히려 느리다 (보관함 2,500곡: 한 줄 0.9초, 4개 동시 1.4초).
+    Windows 는 묶음마다 파일을 미리 열어 백신 검사를 먼저 끝내 둔다 (prewarm)."""
     wall = cpu = 0.0
+    prewarm(paths[:LOAD_PROBE])
     for p in paths[:LOAD_PROBE]:
         w0, c0 = time.perf_counter(), time.thread_time()
         r = load(p)
@@ -94,14 +110,22 @@ def _read_all(paths, load):
         yield r
     rest = paths[LOAD_PROBE:]
     if rest and wall > 2 * cpu + 0.005:
+        from concurrent.futures import ThreadPoolExecutor  # 앱이 켜지는 데 30 ms 넘게 들어 쓸 때 부른다
         pool = ThreadPoolExecutor(max_workers=LOAD_WORKERS)
         try:
             yield from pool.map(load, rest)
         finally:
             pool.shutdown(wait=True, cancel_futures=True)
     else:
-        for p in rest:
-            yield load(p)
+        slow = True  # 미리 열어 보니 금방이면(이미 검사한 파일) 가끔만 해 본다 (곡당 0.05 ms 도 아낀다)
+        for n, i in enumerate(range(0, len(rest), LOAD_BATCH)):
+            chunk = rest[i:i + LOAD_BATCH]
+            if slow or n % 4 == 0:
+                t0 = time.perf_counter()
+                prewarm(chunk)
+                slow = time.perf_counter() - t0 > len(chunk) * 0.0002
+            for p in chunk:
+                yield load(p)
 
 
 class MainWindow(QMainWindow):
@@ -124,8 +148,8 @@ class MainWindow(QMainWindow):
         self.actions = ActionStore(os.path.join(data_dir, "actions.json"))
         self.backups = BackupStore(os.path.join(data_dir, "Backups"))
         self.backup_enabled = self.settings.value("backup_enabled", True, bool)
-        QTimer.singleShot(0, self._prune_backups)  # 오래된 백업 정리는 창이 뜬 뒤에
-        QTimer.singleShot(300, self._preload)
+        self._prune_backups()
+        QTimer.singleShot(800, self._preload)  # 창이 뜨고 나서
 
         # ---- 파일 목록
         self.model = FileModel(self)
@@ -255,19 +279,29 @@ class MainWindow(QMainWindow):
         self._update_status()
 
     def _preload(self):
-        """창이 뜬 직후 나머지 창 모듈을 미리 불러 둔다. 앱이 켜져 있는 동안 앱 파일이 새 버전으로
-        바뀌어도(새로 빌드) 나중에 창을 열 때 다른 버전의 모듈을 읽지 않게 한다."""
-        from . import artworkdialog, backupdialog, classicaldialog, compare, covermatch, dupes, export, extractdialog, exttags, rename, renamedialog, ytclean, ytdialog, ytorder  # noqa: F401
-        from . import albumcheck, tagsource, tagsourcedialog  # noqa: F401
-        if IS_MAC:
-            from . import formatconv, librarycheck  # noqa: F401
+        """창이 뜬 뒤 나머지 창 모듈과 글자 변환표를 미리 불러 둔다. 앱이 켜져 있는 동안 앱 파일이 새 버전으로
+        바뀌어도(새로 빌드) 나중에 창을 열 때 다른 버전의 모듈을 읽지 않게 하고, 창도 바로 열린다.
+        한꺼번에 부르면 창이 잠깐 멈추므로 한 조각씩 부른다."""
+        steps = _preload_steps()
+
+        def step():
+            if next(steps, False) is None:
+                QTimer.singleShot(1, step)
+
+        step()
 
     def _prune_backups(self):
-        try:
-            self.backups.prune(self.settings.value("backup_days", 30, int),
-                               self.settings.value("backup_max_gb", 5, int) * 1024 ** 3)
-        except OSError:
-            pass
+        """오래된 백업 정리 — 백업을 읽고 지우는 데 오래 걸릴 수 있어 창을 붙잡지 않게 따로 돌린다."""
+        days = self.settings.value("backup_days", 30, int)
+        max_bytes = self.settings.value("backup_max_gb", 5, int) * 1024 ** 3
+
+        def prune():
+            try:
+                self.backups.prune(days, max_bytes)
+            except OSError:
+                pass
+
+        threading.Thread(target=prune, daemon=True).start()
 
     # ------------------------------------------------------------ 메뉴
     def _act(self, menu, text, slot, shortcut=None, checkable=False, checked=False):
@@ -291,7 +325,7 @@ class MainWindow(QMainWindow):
         self._act(m, "파일 추가…", self.add_files_dialog, "Ctrl+Alt+O")
         self.recent_menu = m.addMenu("최근 연 폴더")
         self.recent_menu.aboutToShow.connect(self._fill_recent)
-        self._fill_recent()  # macOS 메뉴 막대는 비어 있는 메뉴를 못 열 수 있어 미리 채워 둔다
+        self._fill_recent(check=False)  # macOS 메뉴 막대는 비어 있는 메뉴를 못 열 수 있어 미리 채워 둔다
         m.addSeparator()
         self._act(m, "하위 폴더 포함", self._set_recursive, checkable=True, checked=self.recursive)
         self._act(m, "시작할 때 마지막 목록 다시 열기", lambda on: self.settings.setValue("reopen_last", on),
@@ -767,7 +801,9 @@ class MainWindow(QMainWindow):
         roots += [os.path.abspath(p) for p in paths if os.path.abspath(p) not in roots]
         self.settings.setValue("last_list", roots)
 
-    def _fill_recent(self):
+    def _fill_recent(self, check=True):
+        """check: 폴더가 있는지 확인한다. 앱을 켤 때는 하지 않는다 (꺼져 있는 네트워크 드라이브는 확인에 몇십 초가 걸린다).
+        메뉴를 열 때 다시 채우면서 확인한다."""
         m = self.recent_menu
         m.clear()
         recent = self._settings_list("recent_folders")
@@ -782,7 +818,7 @@ class MainWindow(QMainWindow):
             a.setToolTip(d)
             if i < 9:
                 a.setShortcut(QKeySequence(f"Ctrl+Alt+{i + 1}"))
-            if not os.path.isdir(d):
+            if check and not os.path.isdir(d):
                 a.setText(f"{name}  —  찾을 수 없음")
                 a.setEnabled(False)
             a.triggered.connect(lambda _=False, d=d: self.open_recent(d))
@@ -976,58 +1012,65 @@ class MainWindow(QMainWindow):
             prog.setMinimumDuration(300)
         prepared = {}
         next_draw = 0.0
-        for i, p in enumerate(plans):
-            if prog and time.monotonic() >= next_draw:
-                next_draw = time.monotonic() + PROGRESS_STEP
-                prog.setValue(i)
-            if job is not None and i % BACKUP_BATCH == 0:
-                prepared = self._prepare_backups(job, plans, i)
-            f = p.file
-            old_path = f.path
-            held = []  # 실행 취소용 스냅샷 — 첫 저장 때 파일을 읽으면서 함께 만든다 (따로 읽지 않는다)
-            bentry = None
-            try:
-                if job is not None and (p.touches_tags or p.new_path):
-                    bentry = prepared.pop(i)
-                    if isinstance(bentry, Exception):
-                        err, bentry = bentry, None
-                        raise err
-                new = f
-                if p.remove_tags:
-                    new = new.remove_tags(self.opts, snapshot=held)
-                if p.changes or p.pictures is not None:
-                    new = new.save(p.changes, p.pictures, self.opts, snapshot=None if held else held)
-                cur_path = new.path
-                if p.new_path:
-                    move_file(cur_path, p.new_path)
-                    cur_path = p.new_path
-                entry.items.append(UndoItem(old_path, cur_path, held[0] if held else None))
-                entry.items[-1].pid = pids.get(os.path.realpath(old_path))
-                entry.items[-1].cover = p.pictures is not None  # 커버를 바꿨으면 Music 의 커버도 확인한다
-                held.clear()
-                if bentry is not None:
-                    job.after(bentry, cur_path)
-                    bentry = None
-                if new is f:
-                    new = AudioFile.load(cur_path, self.opts)
-                else:
-                    new.path = cur_path  # 저장 직후 읽은 정보를 그대로 쓴다 (이름 바꾸기는 내용을 바꾸지 않는다)
-                entry.items[-1].after = tag_state(new)
-                self.model.replace(f, new)
-                for path, data in p.exports:
-                    with open(path, "wb") as fh:
-                        fh.write(data)
-            except Exception as e:
-                failed.append((old_path, error_text(e)))
-                if bentry is not None:
-                    job.failed(bentry, str(e))
-                if held and os.path.exists(old_path):
-                    # 일부만 바뀐 채로 남지 않게 되돌려 둔다
-                    entry.items.append(UndoItem(old_path, old_path, held[0]))
+        with IoBatch() as io:
+            for i, p in enumerate(plans):
+                if prog and time.monotonic() >= next_draw:
+                    next_draw = time.monotonic() + PROGRESS_STEP
+                    prog.setValue(i)
+                if i % BACKUP_BATCH == 0:
+                    io.next([q.file.path for q in plans[i:i + BACKUP_BATCH]])
+                    if job is not None:
+                        prepared = self._prepare_backups(job, plans, i)
+                f = p.file
+                old_path = f.path
+                held = []  # 실행 취소용 스냅샷 — 첫 저장 때 파일을 읽으면서 함께 만든다 (따로 읽지 않는다)
+                bentry = None
                 try:
-                    self.model.replace(f, AudioFile.load(f.path, self.opts))
-                except Exception:
-                    pass
+                    if job is not None and (p.touches_tags or p.new_path):
+                        bentry = prepared.pop(i)
+                        if isinstance(bentry, Exception):
+                            err, bentry = bentry, None
+                            raise err
+                    keep = (lambda b=bentry: job.keep_whole(b)) if bentry is not None else None
+                    new = f
+                    if p.remove_tags:
+                        new = new.remove_tags(self.opts, snapshot=held, before_move=keep)
+                    if p.changes or p.pictures is not None:
+                        new = new.save(p.changes, p.pictures, self.opts, snapshot=None if held else held, before_move=keep)
+                    cur_path = new.path
+                    if p.new_path:
+                        move_file(cur_path, p.new_path)
+                        io.moved(cur_path, p.new_path)
+                        cur_path = p.new_path
+                    entry.items.append(UndoItem(old_path, cur_path, held[0] if held else None))
+                    entry.items[-1].pid = pids.get(os.path.realpath(old_path)) if pids else None
+                    entry.items[-1].cover = p.pictures is not None  # 커버를 바꿨으면 Music 의 커버도 확인한다
+                    held.clear()
+                    if bentry is not None:
+                        job.after(bentry, cur_path)
+                        bentry = None
+                    if new is f:
+                        new = AudioFile.load(cur_path, self.opts)
+                    else:
+                        new.path = cur_path  # 저장 직후 읽은 정보를 그대로 쓴다 (이름 바꾸기는 내용을 바꾸지 않는다)
+                    entry.items[-1].after = tag_state(new)
+                    entry.items[-1].stamp = file_stamp(new)
+                    self.model.replace(f, new)
+                    for path, data in p.exports:
+                        with open(path, "wb") as fh:
+                            fh.write(data)
+                except Exception as e:
+                    failed.append((old_path, error_text(e)))
+                    if bentry is not None:
+                        job.failed(bentry, str(e))
+                    if held and os.path.exists(old_path):
+                        # 일부만 바뀐 채로 남지 않게 되돌려 둔다
+                        entry.items.append(UndoItem(old_path, old_path, held[0]))
+                    try:
+                        self.model.replace(f, AudioFile.load(f.path, self.opts))
+                    except Exception:
+                        pass
+        failed += io.errors
         if prog:
             prog.close()
         if job is not None:
@@ -1122,23 +1165,29 @@ class MainWindow(QMainWindow):
         back.album_change = getattr(entry, "album_change", True)
         by_path = {f.path: f for f in self.model.files}
         failed = []
-        for item in reversed(entry.items):
-            try:
-                now = take_snapshot(item.new_path) if item.snapshot is not None else None
-                if item.new_path != item.old_path:
-                    move_file(item.new_path, item.old_path)
-                if item.snapshot is not None:
-                    restored = restore_snapshot(item.old_path, item.snapshot, opts=self.opts)
-                else:
-                    restored = AudioFile.load(item.old_path, self.opts)
-                rev = UndoItem(item.new_path, item.old_path, now, tag_state(restored))
-                rev.pid = getattr(item, "pid", None)
-                back.items.append(rev)
-                f = by_path.get(item.new_path)
-                if f is not None:
-                    self.model.replace(f, restored)
-            except Exception as e:
-                failed.append((item.new_path, error_text(e)))
+        items = list(reversed(entry.items))
+        with IoBatch() as io:
+            for k, item in enumerate(items):
+                if k % BACKUP_BATCH == 0:
+                    io.next([x.new_path for x in items[k:k + BACKUP_BATCH]])
+                try:
+                    held = []  # 되돌리기 직전 상태 — 다시 실행용 (되돌리면서 함께 만든다)
+                    if item.new_path != item.old_path:
+                        move_file(item.new_path, item.old_path)
+                    if item.snapshot is not None:
+                        restored = restore_snapshot(item.old_path, item.snapshot, opts=self.opts, capture=held)
+                    else:
+                        restored = AudioFile.load(item.old_path, self.opts)
+                    rev = UndoItem(item.new_path, item.old_path, held[0] if held else None, tag_state(restored),
+                                   file_stamp(restored))
+                    rev.pid = getattr(item, "pid", None)
+                    back.items.append(rev)
+                    f = by_path.get(item.new_path)
+                    if f is not None:
+                        self.model.replace(f, restored)
+                except Exception as e:
+                    failed.append((item.new_path, error_text(e)))
+        failed += io.errors
         if back.items:
             if stack is self.undo_stack:
                 self.redo_stack.append(back)
@@ -1162,9 +1211,12 @@ class MainWindow(QMainWindow):
         → None: 그만둠, set(): 그대로 되돌림, {경로…}: 그 곡은 빼고 되돌림."""
         changed = []
         for item in entry.items:
-            if item.after is None or not os.path.exists(item.new_path):
+            if item.after is None:
                 continue
             try:
+                st = os.stat(item.new_path)
+                if item.stamp == (st.st_size, st.st_mtime, st.st_ino):
+                    continue  # 저장한 뒤로 파일이 그대로다 — 읽어 볼 필요가 없다
                 now = tag_state(AudioFile.load(item.new_path, self.opts))
             except Exception:
                 continue
@@ -1675,7 +1727,8 @@ class MainWindow(QMainWindow):
             for item in entry.items:
                 if os.path.realpath(item.new_path) in want and item.after is not None:
                     try:
-                        item.after = tag_state(AudioFile.load(item.new_path, self.opts))
+                        now = AudioFile.load(item.new_path, self.opts)
+                        item.after, item.stamp = tag_state(now), file_stamp(now)
                     except Exception:
                         pass
 
@@ -2123,39 +2176,74 @@ ENCODINGS = ("utf-8", "utf-8-sig", "utf-16", "utf-16-le", "utf-16-be", "latin-1"
              "cp932", "shift_jis", "cp1252", "idna", "mbcs")
 
 
-def _preload_codecs():
+PRELOAD_MODULES = ("artworkdialog", "backupdialog", "classicaldialog", "compare", "covermatch", "dupes", "export",
+                   "extractdialog", "exttags", "rename", "renamedialog", "ytclean", "ytdialog", "ytorder",
+                   "albumcheck", "tagsource", "tagsourcedialog", "formatconv")
+
+
+def _preload_steps():
+    """미리 불러 둘 것을 하나씩 (하나 부를 때마다 멈춘다)."""
     import codecs
+    import importlib
     for name in ENCODINGS:
         try:
             codecs.lookup(name)
         except LookupError:
             pass  # mbcs 는 Windows 에만
+        yield
+    _file_formats()
+    yield
+    for name in PRELOAD_MODULES + (("librarycheck",) if IS_MAC else ()):
+        importlib.import_module("." + name, __package__)
+        yield
+
+
+# 한글·일본어가 섞인 곡명이 고르게 보이도록. 맑은 고딕에 없는 글자(일본어 한자 일부 등)는 Yu Gothic UI 로
+FONT_FAMILIES = ["Malgun Gothic", "Yu Gothic UI", "Segoe UI"]
+
+
+def _app_font(families):
+    from PySide6.QtGui import QFont
+    font = QFont(families[0], 9)
+    font.setFamilies(families)
+    return font
+
+
+def _finish_fonts(app, window):
+    """대체 글꼴까지 찾으려면 설치된 글꼴을 모두 읽느라 0.5초가 든다 (맑은 고딕만이면 0.05초).
+    그래서 창은 맑은 고딕으로 먼저 띄우고, 뒤에서 글꼴을 읽어 둔 뒤 바꾼다 — 줄 높이 등은 그대로이고 바꾸는 데 2 ms 도 안 든다."""
+    def warm(_prog, _cancelled):
+        from PySide6.QtGui import QFontMetrics
+        QFontMetrics(_app_font(FONT_FAMILIES)).height()
+
+    run_task(window, "", warm, lambda _r: app.setFont(_app_font(FONT_FAMILIES)), lambda _m: None, modal=False)
 
 
 def main(argv=None):
     import sys
-    _preload_codecs()
     argv = argv if argv is not None else sys.argv
     app = App(argv)
     app.setApplicationName(APP_NAME)
     if IS_WIN:
-        # 한글·일본어가 섞인 곡명이 고르게 보이도록
-        from PySide6.QtGui import QFont
-        font = QFont("Malgun Gothic", 9)
-        font.setFamilies(["Malgun Gothic", "Yu Gothic UI", "Segoe UI"])
-        app.setFont(font)
+        app.setFont(_app_font(FONT_FAMILIES[:1]))
         app.setWindowIcon(_app_icon())
     w = MainWindow()
     app.window = w
     w.show()
+    if IS_WIN:
+        QTimer.singleShot(100, lambda: _finish_fonts(app, w))  # 창을 그린 뒤에
     paths = [p for p in argv[1:] if os.path.exists(p)]
-    if paths:
-        w.load_paths(paths, replace=True)
-    else:
-        QTimer.singleShot(0, w.reopen_last)
+    # 창을 먼저 그리고 불러온다
+    QTimer.singleShot(30, (lambda: w.load_paths(paths, replace=True)) if paths else w.reopen_last)
     code = app.exec()
     if getattr(w, "tasks_left", False):
         # 취소해도 끝나지 않은 작업 — 창을 지우면 도는 스레드 때문에 Qt 가 앱을 죽이므로 정리 없이 끝낸다
         sys.stdout.flush()
+        if IS_WIN:  # os._exit 는 DLL 마무리를 돌리는데, 스레드가 Qt 안에 있으면 거기서 죽을 수 있다 (설정은 이미 저장했다)
+            import ctypes
+            k32 = ctypes.WinDLL("kernel32")
+            k32.GetCurrentProcess.restype = ctypes.c_void_p
+            k32.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+            k32.TerminateProcess(k32.GetCurrentProcess(), code)
         os._exit(code)
     return code

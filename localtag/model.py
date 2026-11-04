@@ -90,7 +90,14 @@ COLUMN_WIDTHS = {
 RIGHT_ALIGNED = {"length", "bitrate", "samplerate", "size", "cover", "bits"}
 
 
-DISPLAY_ROLES = (Qt.DisplayRole, Qt.ToolTipRole)
+# 역할은 int 로 비교한다 — Qt.XxxRole 은 꺼낼 때마다 느리고, 표를 한 번 그리는 데 data() 가 약 2000번 불린다
+_DISPLAY_ROLE = int(Qt.DisplayRole)
+_EDIT_ROLE, _ALIGN_ROLE, _SORT_ROLE = int(Qt.EditRole), int(Qt.TextAlignmentRole), int(SORT_ROLE)
+DISPLAY_ROLES = frozenset({_DISPLAY_ROLE, int(Qt.ToolTipRole)})
+_USED_ROLES = DISPLAY_ROLES | {_EDIT_ROLE, _ALIGN_ROLE, _SORT_ROLE}
+_HORIZONTAL = Qt.Horizontal
+_ALIGNS = tuple(int(Qt.AlignRight | Qt.AlignVCenter) if c[0] in RIGHT_ALIGNED else None for c in COLUMNS)
+_COLUMN_COUNT = len(COLUMNS)
 # 목록 칸에서 바로 고칠 수 있는 열 (파일명은 확장자를 뺀 이름만 고친다)
 EDITABLE = {"filename", "title", "artist", "album", "albumartist", "year", "track", "disc",
             "genre", "composer", "comment", *SORT_FIELDS}
@@ -105,42 +112,41 @@ class FileModel(QAbstractTableModel):
         self.sort_column = -1
         self.sort_order = Qt.AscendingOrder
         self._rows: dict[int, int] | None = None  # id(파일) → 행 (필요할 때 만든다)
+        self._flags = None  # (열마다 고칠 수 있을 때의 flags, 고칠 수 없을 때의 flags) — 한 번만 계산한다
         self.on_edit = None  # (파일, 열 키, 새 값) — 칸에서 고친 값을 실제로 저장하는 쪽 (MainWindow)
 
     def rowCount(self, parent=QModelIndex()):
         return 0 if parent.isValid() else len(self.files)
 
     def columnCount(self, parent=QModelIndex()):
-        return 0 if parent.isValid() else len(COLUMNS)
+        return 0 if parent.isValid() else _COLUMN_COUNT
 
     def headerData(self, section, orientation, role=Qt.DisplayRole):
-        if orientation == Qt.Horizontal and role == Qt.DisplayRole:
+        if role == _DISPLAY_ROLE and orientation == _HORIZONTAL:
             return COLUMNS[section][1]
         return None
 
     def data(self, index, role=Qt.DisplayRole):
         # 표를 그릴 때 칸마다 여러 역할을 묻는다. 쓰지 않는 역할은 바로 돌려보낸다
-        if not index.isValid():
+        if role not in _USED_ROLES or not index.isValid():
             return None
         if role in DISPLAY_ROLES:
             return COLUMNS[index.column()][2](self.files[index.row()])
-        if role == Qt.EditRole:
+        if role == _ALIGN_ROLE:
+            return _ALIGNS[index.column()]
+        if role == _EDIT_ROLE:
             key = COLUMNS[index.column()][0]
             f = self.files[index.row()]
             return f.stem if key == "filename" else f.get(key)
-        if role == Qt.TextAlignmentRole:
-            if COLUMNS[index.column()][0] in RIGHT_ALIGNED:
-                return int(Qt.AlignRight | Qt.AlignVCenter)
-            return None
-        if role == SORT_ROLE:
-            return COLUMNS[index.column()][3](self.files[index.row()])
-        return None
+        return COLUMNS[index.column()][3](self.files[index.row()])  # SORT_ROLE
 
     def flags(self, index):
-        fl = super().flags(index)
-        if index.isValid() and self.on_edit and COLUMNS[index.column()][0] in EDITABLE:
-            fl |= Qt.ItemIsEditable
-        return fl
+        if not index.isValid():
+            return super().flags(index)
+        if self._flags is None:
+            base = super().flags(index)
+            self._flags = (tuple(base | Qt.ItemIsEditable if k in EDITABLE else base for k in COLUMN_KEYS), base)
+        return self._flags[0][index.column()] if self.on_edit else self._flags[1]
 
     def setData(self, index, value, role=Qt.EditRole):
         if role != Qt.EditRole or not index.isValid() or not self.on_edit:

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from functools import lru_cache
 
 # 괄호 안에 이 말이 들어 있으면 통째로 지운다 (대소문자 무시)
 NOISE = [
@@ -38,6 +39,7 @@ def _is_noise(inner: str, keep_cover: bool) -> bool:
     return not re.sub(r"[\W_]+", "", rest)
 
 
+@lru_cache(maxsize=8192)  # 태그 가져오기는 같은 제목을 곡·트랙 짝마다 다시 부른다
 def strip_noise(s: str, keep_cover: bool = True) -> str:
     """괄호 속 꼬리말과 끝에 붙은 'MV', 'Official Video' 같은 말을 지운다."""
     out, i = [], 0

@@ -54,11 +54,17 @@ class UndoItem:
     new_path: str
     snapshot: Snapshot | None
     after: tuple | None = None  # 저장 직후 태그 상태 (tag_state) — 되돌리기 전에 다른 곳에서 바뀌었는지 본다
+    stamp: tuple | None = None  # 저장 직후 파일 표시 (file_stamp) — 그대로면 태그를 읽어 보지 않아도 된다
 
 
 def tag_state(af: AudioFile) -> tuple:
     """비교용 태그 상태: (필드 값, 커버 크기들). 커버 데이터는 담지 않는다 (메모리)."""
     return ({k: tuple(v) for k, v in af.tags.items() if v}, tuple(len(p.data) for p in af.pictures))
+
+
+def file_stamp(af: AudioFile) -> tuple:
+    """파일이 그대로인지 보는 표시 (크기, 수정 시각, 파일 번호)."""
+    return (af.size, af.mtime, af.ino)
 
 
 def state_diff(before: tuple, now: tuple) -> list[str]:

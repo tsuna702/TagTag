@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import os
 import re
-import subprocess
 import sys
 
 IS_MAC = sys.platform == "darwin"
@@ -16,8 +15,10 @@ REVEAL_LABEL = f"{FILE_MANAGER}에서 보기"
 def reveal(path: str):
     """파일 관리자에서 파일을 골라 보여 준다."""
     if IS_MAC:
+        import subprocess
         subprocess.run(["open", "-R", path], check=False)
     elif IS_WIN:
+        import subprocess
         subprocess.run(f'explorer /select,"{os.path.normpath(path)}"', check=False)
     else:
         open_folder(os.path.dirname(path))
@@ -26,10 +27,12 @@ def reveal(path: str):
 def open_folder(folder: str):
     """폴더를 파일 관리자로 연다."""
     if IS_MAC:
+        import subprocess
         subprocess.run(["open", folder], check=False)
     elif IS_WIN:
         os.startfile(os.path.normpath(folder))
     else:
+        import subprocess
         subprocess.run(["xdg-open", folder], check=False)
 
 

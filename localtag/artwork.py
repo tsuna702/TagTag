@@ -13,6 +13,7 @@ import os
 import re
 import ssl
 import time
+from functools import lru_cache
 from html.parser import HTMLParser
 from urllib import error, parse, request
 
@@ -162,7 +163,9 @@ def describe(data: bytes) -> str:
 
 # ------------------------------------------------------------------ 네트워크
 
+@lru_cache(maxsize=1)
 def _ssl_context():
+    """인증서 묶음을 읽는 데 요청마다 몇 ms 가 들어 한 번만 만들어 함께 쓴다 (여러 스레드가 함께 써도 된다)."""
     try:
         import certifi
         return ssl.create_default_context(cafile=certifi.where())

@@ -34,10 +34,13 @@ a = Analysis(
               "PySide6.QtWebEngineCore", "PySide6.QtMultimedia", "PySide6.QtPdf"],
 )
 # 쓰지 않는 Qt 플러그인(가상 키보드 입력기, PDF 이미지 읽기, 터치 장치)과 그 DLL,
-# 소프트웨어 OpenGL(opengl32sw.dll, 약 20MB — 위젯 앱이라 쓰지 않음)은 넣지 않는다
+# 소프트웨어 OpenGL(opengl32sw.dll, 약 20MB — 위젯 앱이라 쓰지 않음)은 넣지 않는다.
+# 그림 형식은 커버로 쓸 만한 것만 (이미지를 처음 읽을 때 Qt 가 형식 플러그인을 모두 불러온다), 화면은 Windows 것만
 DROP = ("/platforminputcontexts/", "/qpdf.", "/qtuiotouchplugin.", "opengl32sw.",
         "Qt6Quick", "Qt6Qml", "Qt6VirtualKeyboard", "Qt6Pdf", "Qt6Network", "Qt6OpenGL",
-        "QtQuick", "QtQml", "QtPdf", "QtNetwork", "QtOpenGL")
+        "QtQuick", "QtQml", "QtPdf", "QtNetwork", "QtOpenGL",
+        "/qsvg.", "/qsvgicon.", "Qt6Svg", "/qicns.", "/qtga.", "/qwbmp.",
+        "/qdirect2d.", "/qminimal.", "/qoffscreen.")
 
 
 def _keep(entry):
