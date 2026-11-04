@@ -77,13 +77,14 @@ COLUMNS = [
     ("bits", "비트 깊이", lambda f: f"{f.bits} bit" if f.bits else "", lambda f: f.bits, False),
     ("quality", "음질", quality_label, lambda f: f.quality_key(), False),
     *[(k, FIELD_LABELS[k], *_tag(k), False) for k in SORT_FIELDS],
+    ("btime", "생성된 날짜", lambda f: time.strftime("%Y-%m-%d %H:%M", time.localtime(f.btime)), lambda f: f.btime, False),
 ]
 COLUMN_KEYS = [c[0] for c in COLUMNS]
 COLUMN_WIDTHS = {
     "filename": 240, "folder": 200, "title": 200, "artist": 150, "album": 170,
     "albumartist": 150, "year": 55, "track": 50, "disc": 50, "genre": 100,
     "composer": 130, "comment": 160, "cover": 45, "length": 60, "bitrate": 80,
-    "samplerate": 85, "codec": 55, "realcodec": 60, "bits": 65, "quality": 60, "tagtype": 120, "size": 75, "mtime": 120, "path": 300,
+    "samplerate": 85, "codec": 55, "realcodec": 60, "bits": 65, "quality": 60, "tagtype": 120, "size": 75, "mtime": 120, "btime": 120, "path": 300,
     "TITLESORT": 160, "ARTISTSORT": 140, "ALBUMSORT": 160, "ALBUMARTISTSORT": 140,
 }
 RIGHT_ALIGNED = {"length", "bitrate", "samplerate", "size", "cover", "bits"}

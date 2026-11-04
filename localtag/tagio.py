@@ -767,6 +767,7 @@ class AudioFile:
     tag_type: str = ""
     size: int = 0
     mtime: float = 0.0
+    btime: float = 0.0     # 파일이 생성된 시각
     dev: int = 0
     ino: int = 0
 
@@ -826,7 +827,7 @@ class AudioFile:
         if isinstance(path, str):
             af = cls(path=path)
             st = os.stat(path)
-            af.size, af.mtime = st.st_size, st.st_mtime
+            af.size, af.mtime, af.btime = st.st_size, st.st_mtime, _birthtime(st)
             af.dev, af.ino = st.st_dev, st.st_ino
         else:  # 메모리 작업 사본 (저장 검증) — 경로·파일 정보는 _adopt 가 원본 것으로 채운다
             af = cls(path=path.name)
@@ -1110,13 +1111,18 @@ def _snapshot_of(mf, path: str, times) -> Snapshot:
     return Snapshot(kind, data, had_v1, *times)
 
 
+def _birthtime(st) -> float:
+    """파일이 생성된 시각 (Windows 의 예전 Python 은 st_birthtime 이 없고 st_ctime 이 생성 시각)."""
+    return getattr(st, "st_birthtime", st.st_ctime)
+
+
 def _adopt(af, path: str, opts: Options) -> AudioFile:
     """저장 검증 때 작업 사본에서 읽은 정보를 원본의 경로·파일 정보로 고친다 (파일을 다시 읽지 않는다)."""
     if af is None:
         return AudioFile.load(path, opts)
     st = os.stat(path)
     af.path = path
-    af.size, af.mtime, af.dev, af.ino = st.st_size, st.st_mtime, st.st_dev, st.st_ino
+    af.size, af.mtime, af.btime, af.dev, af.ino = st.st_size, st.st_mtime, _birthtime(st), st.st_dev, st.st_ino
     return af
 
 
