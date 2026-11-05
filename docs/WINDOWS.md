@@ -125,4 +125,5 @@ v1.1.16 — 맥에서 냄: 1.1.15 를 맥에서 tests/ 모두 PASS 확인하고 
   - Music: `music._run_script` 가 100 ms 마다 확인해 명령 한 번에 최대 0.1초 기다리던 것을 `select.poll` 로 없앰 (맥 전용). 보내는 스크립트는 그대로다. Music 없이 실제 osascript 로만 시험했고(`test_music_script.py`) 실제 Music 반영은 돌려 보지 않았다.
   - 켜는 시간: `music.py` 의 `subprocess`·`plistlib`·`tempfile` 등을 함수 안으로 (맥), 시작할 때의 백업 정리를 2초 뒤로 (**모든 OS**), `LocalTag.spec` 의 excludes 에 `multiprocessing`·`bz2`·`lzma`·`compression.zstd`·`_pydecimal`·`tarfile`·`PySide6.QtDBus` (맥 40 ms, 앱 3MB. `QtDBus` 는 파이썬 모듈만 빠진다 — `QtGui` 가 링크하는 프레임워크는 남겨야 한다).
   - 확인: 맥 tests/ 30개 PASS, `test_fast_save.py` 를 exFAT 이미지 위에서도 PASS (복제본을 실제로 못 만드는 곳), 빌드한 앱에서 모듈 40개·형식 5개의 불러오기·저장·되돌리기·백업·HTTPS 인증서·osascript PASS.
+  - 맥 개발 환경을 고정했다: `make_venv.sh` 가 Python 3.14 + `requirements-lock.txt` 로 `.venv` 를 만든다 (맥 전용. Windows 는 지금처럼 `requirements.txt`).
   - **Windows 에서 할 일:** 합쳐서 tests/ 모두 돌린 뒤 v1.1.16 에 zip 을 붙인다 (`.\release_win.ps1`). Windows 에 닿는 코드는 UTF-16 지름길과 백업 정리 시각뿐이고 `TAGS_ONLY`·`IoBatch` 는 그대로다. `LocalTag-win.spec` 은 고치지 않았다 — 같은 excludes 를 넣어 볼 만하지만 Windows 빌드에서 따로 확인해야 한다.

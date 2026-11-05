@@ -8,6 +8,8 @@ Mp3tag 스타일의 음악 태그 편집기 (macOS, Python + PySide6 + mutagen).
     ./run.sh                 # 빈 창으로 시작
     ./run.sh ~/Music/앨범폴더  # 폴더를 열면서 시작
 
+처음 실행할 때 릴리스와 같은 버전으로 가상환경(`.venv`)을 만듭니다. 파이썬 3.14가 필요하고(`brew install python@3.14`), 라이브러리 약 1.3GB를 내려받습니다.
+
 ## 앱(.app)으로 만들기
 
     ./build_app.sh           # → dist/LocalTag.app

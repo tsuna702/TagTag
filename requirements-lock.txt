@@ -1,0 +1,16 @@
+# 맥 빌드 환경 (Python 3.14): 1.1.16 을 빌드한 버전. make_venv.sh 가 이 목록으로 .venv 를 만든다.
+# 라이브러리를 올리면 시험한 뒤 .venv/bin/pip freeze 로 다시 만든다. Windows 는 requirements.txt 를 쓴다.
+altgraph==0.17.5
+certifi==2026.7.22
+macholib==1.16.4
+mutagen==1.48.1
+packaging==26.3
+pyinstaller==6.22.3
+pyinstaller-hooks-contrib==2026.8
+PySide6==6.12.0
+PySide6_Addons==6.12.0
+PySide6_Essentials==6.12.0
+PySide6_Pdf==6.12.0.140
+PySide6_WebEngine==6.12.0.140
+setuptools==84.0.0
+shiboken6==6.12.0

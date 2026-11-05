@@ -21,6 +21,8 @@ Mp3tag 를 본뜬 음악 태그 편집기. Python 3 + PySide6(Qt) + mutagen. Git
    - macOS: `./release.sh` (빌드 → zip → `gh release create`). 커밋 안 한 변경이 있거나 같은 태그가 있으면 멈춘다.
    - Windows: `.\release_win.ps1` (windows 브랜치에서. 같은 버전 릴리스에 Windows zip 을 붙인다 — docs/WINDOWS.md 의 "릴리스").
    - 커밋 끝에 `Co-Authored-By:` 줄을 붙인다.
+   - 맥 환경: `.venv` 는 `make_venv.sh` 가 Python 3.14 + `requirements-lock.txt` 로 만든다 (`run.sh`·`build_app.sh` 가 부른다, 약 1.3GB 내려받음. `python3` 은 3.15 를 가리키므로 쓰지 않는다). 라이브러리를 올리면 시험한 뒤 `pip freeze` 로 잠금 파일을 다시 만든다. Windows 는 `requirements.txt` 를 쓴다.
+   - 사용자의 앱은 `/Applications/LocalTag.app` 이다 (1.1.16 부터). `dist/` 는 빌드 결과일 뿐이고, 릴리스해도 응용 프로그램 폴더의 앱은 저절로 바뀌지 않는다.
 2. **테스트는 사용자의 실제 환경을 건드리지 않는다.** `tests/harness.py` 를 쓴다.
    - 설정은 임시 INI 로 바꿔 끼운다. 실제 설정(macOS plist, Windows 레지스트리 `HKCU\Software\LocalTag`)에 `clear()` 금지.
    - `HOME`·`CFFIXED_USER_HOME` 를 임시 폴더로 바꿔도 **QSettings 는 격리되지 않는다** (맥의 cfprefsd 가 실제 plist 를 준다). 빌드한 앱을 따로 띄워 불러오기·저장을 시험할 때도
