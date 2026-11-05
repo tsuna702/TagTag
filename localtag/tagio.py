@@ -32,6 +32,7 @@ from mutagen.trueaudio import TrueAudio
 from mutagen.wave import WAVE
 
 import mutagen._util as _mutagen_util
+import mutagen.id3._specs as _id3_specs
 import mutagen.id3._tags as _id3_tags
 import mutagen.mp4 as _mutagen_mp4
 
@@ -78,6 +79,34 @@ def _read_frames_fast(id3, data, frames):
 
 
 _id3_tags.read_frames = _read_frames_fast
+
+_decode_terminated = _id3_specs.decode_terminated
+_UTF16_BOM = {b"\xff\xfe": "utf-16-le", b"\xfe\xff": "utf-16-be"}
+
+
+def _decode_terminated_fast(data, encoding, strict=True):
+    # mutagen 은 UTF-16 글을 한 바이트씩 파이썬으로 풀어 첫 NUL 을 찾는다 (MP3 태그를 읽는 시간의 5분의 1, 가사가 길면 곡당 수십 ms).
+    # 짝수 위치의 NUL 을 찾아 한 번에 푼다. 결과와 오류는 같다 (test_fast_save 가 무작위 입력으로 비교한다).
+    if encoding == "utf16":
+        codec, start = _UTF16_BOM.get(data[:2]), 2
+        if codec is None:  # BOM 이 없는 경우 등은 mutagen 그대로
+            return _decode_terminated(data, encoding, strict)
+    elif encoding == "utf_16_be":
+        codec, start = "utf-16-be", 0
+    else:
+        return _decode_terminated(data, encoding, strict)
+    end = data.find(b"\0\0", start)
+    while end != -1 and (end - start) % 2:
+        end = data.find(b"\0\0", end + 1)
+    if end == -1:
+        text = data[start:].decode(codec)  # 풀 수 없으면 NUL 이 없다는 오류보다 먼저 알린다 (mutagen 과 같다)
+        if strict:
+            raise ValueError("not null terminated")
+        return text, b""
+    return data[start:end].decode(codec), data[end + 2:]
+
+
+_id3_specs.decode_terminated = _decode_terminated_fast
 
 if IS_WIN:  # 오디오를 옮길 때도 CHUNK 크기로 (safewrite.CHUNK 참고)
     for _fn in (_mutagen_util.resize_file, _mutagen_util.move_bytes, _mutagen_util.insert_bytes, _mutagen_util.delete_bytes):

@@ -6,17 +6,12 @@ AppleScript(osascript)를 쓰므로 처음에 macOS가 'Music 제어' 권한을 
 """
 from __future__ import annotations
 
-import base64
 import ctypes
 import os
-import plistlib
 import re
-import subprocess
 import sys
-import tempfile
 import time
 import unicodedata
-from urllib.parse import unquote, urlsplit
 
 
 class MusicError(Exception):
@@ -337,6 +332,7 @@ end run
 
 
 def _osascript(script, *args, timeout=60):
+    import subprocess  # 앱이 켜지는 데 시간이 들어 쓸 때 부른다 (곡을 고르는 일과 상관없는 C 모듈을 여럿 부른다)
     try:
         r = subprocess.run(["/usr/bin/osascript", "-e", script, "--", *args],
                            capture_output=True, text=True, timeout=timeout)
@@ -353,6 +349,7 @@ def _osascript(script, *args, timeout=60):
 
 def _osascript_js(script, timeout=120):
     """JavaScript for Automation 으로 실행 (곡 정보를 한꺼번에 JSON 으로 받을 때)."""
+    import subprocess
     try:
         r = subprocess.run(["/usr/bin/osascript", "-l", "JavaScript", "-e", script],
                            capture_output=True, text=True, timeout=timeout)
@@ -372,6 +369,7 @@ def ensure_access(launch=False):
     if media_library_status() == "ask":
         request_media_library()
     if launch:
+        import subprocess
         subprocess.run(["/usr/bin/open", "-g", "-b", "com.apple.Music"], capture_output=True, timeout=15)
     out = _osascript(PREFLIGHT, timeout=150)
     if out.strip() != "READY":
@@ -471,22 +469,32 @@ def request_media_library(cancelled=lambda: False) -> bool:
 
 
 def open_privacy_settings(kind: str = "automation"):
+    import subprocess
     pane = "Privacy_Media" if kind == "media" else "Privacy_Automation"
     subprocess.run(["/usr/bin/open", "x-apple.systempreferences:com.apple.preference.security?" + pane], check=False)
 
 
 def _run_script(script, args, progress, cancelled, idle_limit=240):
     """osascript 를 돌리면서 log 줄을 실시간으로 읽는다. (log 줄 목록) 을 돌려준다."""
-    with tempfile.TemporaryFile() as out, tempfile.NamedTemporaryFile() as errs:
-        proc = subprocess.Popen(["/usr/bin/osascript", "-e", script, "--", *args], stdout=out, stderr=errs)
-        reader = open(errs.name, "rb")
-        offset, pending, lines = 0, b"", []
-        last = time.monotonic()
-        try:
-            while True:
-                reader.seek(offset)
-                data = reader.read()
-                offset += len(data)
+    import select
+    import subprocess
+    proc = subprocess.Popen(["/usr/bin/osascript", "-e", script, "--", *args], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    fd = proc.stderr.fileno()
+    waiter = select.poll()
+    waiter.register(fd, select.POLLIN)
+    pending, lines = b"", []
+    last = time.monotonic()
+    try:
+        while True:
+            # 줄이 오거나 끝나면 바로 깨어난다 (예전에는 0.1초씩 쉬며 확인해 부를 때마다 그만큼 늦었다). 취소·응답 없음은 늦어도 0.1초마다 본다
+            if waiter.poll(100):
+                data = os.read(fd, 65536)
+                if not data:
+                    try:  # 파이프가 닫혔으면 곧 끝난다 — 끝나는 중인 것을 kill 하지 않는다 (끝 코드로 성공·실패를 가린다)
+                        proc.wait(5)
+                    except subprocess.TimeoutExpired:
+                        pass
+                    break
                 pending += data
                 while b"\n" in pending:
                     raw, pending = pending.split(b"\n", 1)
@@ -497,31 +505,27 @@ def _run_script(script, args, progress, cancelled, idle_limit=240):
                         last = time.monotonic()
                     else:
                         lines.append(text)
-                if proc.poll() is not None:
-                    reader.seek(offset)
-                    if reader.read():
-                        continue
-                    break
-                if cancelled():
-                    raise MusicError("취소했습니다. 일부 곡은 이미 반영됐을 수 있습니다.")
-                if time.monotonic() - last > idle_limit:
-                    raise MusicError("Music이 오래 응답하지 않습니다. 일부 곡은 이미 반영됐을 수 있습니다.")
-                time.sleep(0.1)
-        finally:
-            if proc.poll() is None:
-                proc.kill()
-            proc.wait()
-            reader.close()
-        if pending:
-            lines.append(pending.decode("utf-8", "replace"))
-        if proc.returncode:
-            detail = "\n".join(l for l in lines if "LOCALTAG_" not in l)
-            if "-1743" in detail:
-                raise MusicError(PERMISSION_HELP)
-            if "-600" in detail or "먼저 열어" in detail:
-                raise MusicError("Apple Music을 먼저 열어 주세요.")
-            raise MusicError("Music 작업을 끝내지 못했습니다.\n" + detail.strip())
-        return lines
+            elif proc.poll() is not None:
+                break  # 끝났는데 파이프가 닫히지 않은 경우
+            if cancelled():
+                raise MusicError("취소했습니다. 일부 곡은 이미 반영됐을 수 있습니다.")
+            if time.monotonic() - last > idle_limit:
+                raise MusicError("Music이 오래 응답하지 않습니다. 일부 곡은 이미 반영됐을 수 있습니다.")
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+        proc.stderr.close()
+    if pending:
+        lines.append(pending.decode("utf-8", "replace"))
+    if proc.returncode:
+        detail = "\n".join(l for l in lines if "LOCALTAG_" not in l)
+        if "-1743" in detail:
+            raise MusicError(PERMISSION_HELP)
+        if "-600" in detail or "먼저 열어" in detail:
+            raise MusicError("Apple Music을 먼저 열어 주세요.")
+        raise MusicError("Music 작업을 끝내지 못했습니다.\n" + detail.strip())
+    return lines
 
 
 def _tagged(lines, marker):
@@ -747,6 +751,7 @@ end run'''
 
 
 def _music_running() -> bool:
+    import subprocess
     return subprocess.run(["/usr/bin/pgrep", "-x", "Music"], capture_output=True).returncode == 0
 
 
@@ -768,6 +773,7 @@ def restart(mode=DEFAULT_RESTART, progress=lambda *_: None) -> str:
     else:
         raise MusicError("Music 이 종료되지 않았습니다. 직접 종료했다가 다시 켜 주세요.")
     # 앞으로 가져오지 않고 뒤에서 켠다 (LocalTag 를 쓰던 흐름을 끊지 않게)
+    import subprocess
     subprocess.run(["/usr/bin/open", "-g", "-b", "com.apple.Music"], capture_output=True, timeout=30)
     for _ in range(300):  # 응답할 때까지 최대 30초
         try:
@@ -861,6 +867,7 @@ def fix_artwork(items, cached=None) -> list:
     todo = [(pid, path, data) for pid, path, data in items if have.get(pid.upper()) != data]
     if not todo:
         return []
+    import tempfile
     with tempfile.TemporaryDirectory(prefix="localtag-art-") as tmp:
         args = []
         for i, (pid, _path, data) in enumerate(todo):
@@ -900,6 +907,8 @@ def _nfc(s):
 
 def album_paths(names, cancelled=lambda: False):
     """앨범 이름으로 Music 보관함의 곡 파일 경로를 찾는다 (앨범 격자에서 끌어온 경우)."""
+    import plistlib
+    import tempfile
     paths, errors = [], []
     for name in dict.fromkeys(names):
         if cancelled():
@@ -1033,6 +1042,7 @@ def _local_path(value):
         return None
     if value.startswith("/"):
         return value
+    from urllib.parse import unquote, urlsplit
     u = urlsplit(value)
     if u.scheme.lower() != "file" or u.netloc.lower() not in ("", "localhost"):
         return None
@@ -1059,6 +1069,8 @@ def read_music_drag():
 
 
 def _paths_from_metadata(raw: bytes):
+    import base64
+    import plistlib
     try:
         doc = plistlib.loads(raw)
     except Exception:

@@ -148,7 +148,7 @@ class MainWindow(QMainWindow):
         self.actions = ActionStore(os.path.join(data_dir, "actions.json"))
         self.backups = BackupStore(os.path.join(data_dir, "Backups"))
         self.backup_enabled = self.settings.value("backup_enabled", True, bool)
-        self._prune_backups()
+        QTimer.singleShot(2000, self._prune_backups)  # 백업이 많으면 오래 걸리므로 창이 다 뜬 뒤에
         QTimer.singleShot(800, self._preload)  # 창이 뜨고 나서
 
         # ---- 파일 목록

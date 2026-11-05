@@ -1,14 +1,15 @@
 """원본 백업 (앨범태그의 저장 백업·되돌리기).
 
-작업 하나마다 폴더를 만들고, 바꾸기 전 원본 파일을 통째로 복사해 둔다.
+작업 하나마다 폴더를 만들고, 바꾸기 전 원본을 보관해 둔다.
 앱을 다시 켜도 백업 관리자에서 되돌릴 수 있다.
 
   Backups/20261013-213000-ab12cd/journal.json
   Backups/20261013-213000-ab12cd/journal.log   (작업 중에만: 파일마다 한 줄씩 덧붙이는 기록)
   Backups/20261013-213000-ab12cd/<uuid>.mp3
-  Backups/20261013-213000-ab12cd/tags.pack     (Windows: 곡마다 오디오 밖의 부분을 이어 붙인 것)
+  Backups/20261013-213000-ab12cd/tags.pack     (곡마다 오디오 밖의 부분을 이어 붙인 것)
 
-Windows(NTFS)에는 복제본(clone)이 없어 통째로 복사하면 저장할 때마다 곡 크기만큼 디스크를 쓴다 (300곡 4GB, 곡당 약 5 ms).
+맥의 같은 APFS 디스크에서는 복제본(clone)으로 통째로 보관한다 — 공간도 시간도 거의 들지 않는다.
+복제본을 만들 수 없으면(Windows, 맥의 외장 디스크) 통째로 복사할 때 저장마다 곡 크기만큼 디스크를 쓴다 (300곡 4GB, 곡당 수십 ms).
 그런데 안전 저장은 오디오 위치가 그대로면 원본의 오디오를 읽지도 쓰지도 않으므로, 오디오 밖(태그)만 보관해도 원래대로 되돌릴 수 있다.
 오디오까지 다시 쓰게 되면(태그가 커짐) 쓰기 직전에 원본 전체를 보관한다 (keep_whole). 오디오 위치를 알 수 없는 형식은 늘 통째로.
 
@@ -25,13 +26,14 @@ import uuid
 from datetime import datetime
 
 from .safewrite import (
-    CHUNK, IS_WIN, IoBatch, MemStage, SafeWriteError, _fsync, _outside, copy_preserving, payload_regions, write_back,
+    CHUNK, IS_MAC, IS_WIN, IoBatch, MemStage, SafeWriteError, _fsync, _outside, clone_preserving, copy_preserving,
+    payload_regions, write_back,
 )
 from .tagio import move_file
 
 LOG_NAME = "journal.log"
 PACK_NAME = "tags.pack"
-TAGS_ONLY = IS_WIN  # 오디오 밖만 보관 (맥은 복제본이라 통째로 두어도 공간·시간이 들지 않는다)
+TAGS_ONLY = IS_WIN  # 늘 오디오 밖만 보관 (맥은 복제본을 만들 수 있으면 통째로, 없으면 오디오 밖만)
 RESTORE_BATCH = 32
 
 
@@ -140,11 +142,13 @@ class BackupJob:
         sync=False 면 기록의 디스크 확정은 sync() 로 따로 한다 — 원본을 바꾸기 전에 반드시 sync()."""
         entry = {"before": path, "after": path, "backup": None, "state": "planned", "size": 0}
         if copy_file:
-            regions = payload_regions(path) if TAGS_ONLY else None
-            if regions is None:
-                self._copy_whole(entry, path)
-            else:
+            regions = None
+            if TAGS_ONLY or (IS_MAC and not self._clone(entry, path)):
+                regions = payload_regions(path)
+            if regions is not None:
                 self._keep_tags(entry, path, regions)
+            elif not entry["backup"]:
+                self._copy_whole(entry, path)
         self._index[id(entry)] = len(self.data["entries"])
         self.data["entries"].append(entry)
         self._append(entry, sync=False)
@@ -155,6 +159,18 @@ class BackupJob:
     def _check_space(self, need):
         if shutil.disk_usage(self.folder).free < need + 64 * 1024 * 1024:
             raise SafeWriteError("백업할 디스크 공간이 부족합니다. 백업을 끄거나 공간을 확보해 주세요.")
+
+    def _clone(self, entry, path) -> bool:
+        """복제본으로 통째로 보관한다. 만들 수 없으면(다른 디스크, 복제본이 없는 디스크) False."""
+        name = uuid.uuid4().hex + os.path.splitext(path)[1]
+        dest = os.path.join(self.folder, name)
+        if not clone_preserving(path, dest):
+            return False
+        entry["size"] = os.path.getsize(dest)
+        if entry["size"] != os.path.getsize(path):
+            raise SafeWriteError("백업 사본 확인에 실패했습니다. 파일을 바꾸지 않았습니다.")
+        entry["backup"] = name
+        return True
 
     def _copy_whole(self, entry, path):
         name = uuid.uuid4().hex + os.path.splitext(path)[1]

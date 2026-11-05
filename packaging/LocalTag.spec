@@ -10,12 +10,14 @@ a = Analysis(
     [os.path.join(SPECPATH, "launcher.py")],
     pathex=[ROOT],
     hiddenimports=["certifi"],
+    # multiprocessing 등은 쓰지 않는데 넣어 두면 앱을 켤 때마다 불러온다 (런타임 훅, zipfile 의 import) — C 모듈 하나에 몇 ms 씩, 합쳐 40 ms
     excludes=["tkinter", "PySide6.QtNetwork", "PySide6.QtQml", "PySide6.QtQuick",
-              "PySide6.QtWebEngineCore", "PySide6.QtMultimedia", "PySide6.QtPdf"],
+              "PySide6.QtWebEngineCore", "PySide6.QtMultimedia", "PySide6.QtPdf", "PySide6.QtDBus",
+              "multiprocessing", "bz2", "lzma", "compression.zstd", "_pydecimal", "tarfile"],
 )
 # 쓰지 않는 Qt 플러그인(가상 키보드 입력기, PDF 이미지 읽기, 터치 장치)과
 # 그 플러그인만 쓰는 프레임워크(QtQuick·QtQml·QtPdf·QtNetwork 등, 약 20MB)는 넣지 않는다
-DROP = ("/platforminputcontexts/", "/libqpdf.", "/libqtuiotouchplugin.",
+DROP = ("/platforminputcontexts/", "/libqpdf.", "/libqtuiotouchplugin.", "/libqminimal.", "/libqoffscreen.",
         "QtQuick", "QtQml", "QtVirtualKeyboard", "QtPdf", "QtNetwork", "QtOpenGL")
 
 
@@ -40,8 +42,8 @@ app = BUNDLE(
     bundle_identifier="io.github.tsuna702.localtag",
     info_plist={
         "CFBundleDisplayName": "LocalTag",
-        "CFBundleShortVersionString": "1.1.15",
-        "CFBundleVersion": "1.1.15",
+        "CFBundleShortVersionString": "1.1.16",
+        "CFBundleVersion": "1.1.16",
         "NSHighResolutionCapable": True,
         "LSApplicationCategoryType": "public.app-category.music",
         "NSHumanReadableCopyright": "LocalTag",

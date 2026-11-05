@@ -1,12 +1,13 @@
-"""속도 개선이 안전을 해치지 않는지 (1.1.15).
+"""속도 개선이 안전을 해치지 않는지 (1.1.15, 1.1.16).
 
 - 작업 사본(MemStage): 무작위로 읽고 쓰고 잘라도 실제 파일과 똑같이 동작 · mutagen 결과가 파일에 직접 쓴 것과 바이트 단위로 같음
 - 큰 파일도 태그 부분만 읽음 · 쓴 양이 너무 커지면 디스크 사본으로 다시
 - 묶음 저장(IoBatch): fsync 를 미뤘다가 한꺼번에 · 수정 시각 그대로 · 실패는 알림
 - 태그만 보관하는 백업: 되돌리면 파일이 바이트 단위로 원래대로 · 오디오를 옮기는 저장은 원본 전체를 보관 · 뒤에 오디오가 밀려도 되돌림
+- 백업 방식: 복제본을 못 만드는 디스크(맥의 외장 exFAT 등)는 태그만 보관 · 메모리 사본의 마지막 수단도 권한·확장 속성을 지킴
 - 남는 자리(패딩): 태그가 커지면 한 번만 오디오를 옮기고, 되돌릴 때는 옮기지 않음 · 커버를 줄이면 파일도 줄어듦
 - 실행 취소: 파일이 그대로면 다시 읽지 않음
-- ID3 프레임 읽기(복사 안 함), 형식 고르기, 표 모델, 글꼴, 미리 불러오기
+- ID3 프레임 읽기(복사 안 함), UTF-16 글 풀기(mutagen 과 결과·오류가 같음), 형식 고르기, 표 모델, 글꼴, 미리 불러오기
 
 실행: python tests/test_fast_save.py
 """
@@ -16,6 +17,7 @@ import os
 import random
 import shutil
 import struct
+import subprocess
 import sys
 import time
 import wave
@@ -24,7 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from harness import RUN, QApplication, check, finish, samples, window  # noqa: E402
 
 import mutagen  # noqa: E402
-from mutagen.id3 import APIC, CHAP, COMM, CTOC, ID3, TIT2, TPE1, CTOCFlags, ID3Tags  # noqa: E402
+from mutagen.id3 import APIC, CHAP, COMM, CTOC, ID3, TIT2, TPE1, TXXX, USLT, CTOCFlags, ID3Tags  # noqa: E402
 from PySide6.QtCore import QModelIndex, Qt  # noqa: E402
 
 from localtag import backup, mainwindow, model, safewrite, tagio  # noqa: E402
@@ -318,7 +320,7 @@ check(safewrite.error_text(ValueError("다른 오류")) == "다른 오류", "다
 
 
 # ---- 5) 백업: 되돌리면 바이트 단위로 원래대로 (태그만 보관 · 통째로 보관 모두)
-def run_backup_checks(mode):
+def run_backup_checks(mode, tags_only):
     w = window()
     work = os.path.join(RUN, f"backup-{mode}")
     os.makedirs(work)
@@ -338,7 +340,7 @@ def run_backup_checks(mode):
     app.processEvents()
     job = latest()
     delta = [e for e in job["entries"] if e.get("delta")]
-    if backup.TAGS_ONLY:
+    if tags_only:
         check(len(delta) == 3 and all(e["backup"] == backup.PACK_NAME for e in delta), f"{mode}: MP3·FLAC·M4A 는 태그만 보관 ({len(delta)})")
         check(job["bytes"] < sum(os.path.getsize(p) for p in paths.values() if not p.endswith(".ogg")) + os.path.getsize(paths[".ogg"]), f"{mode}: 백업이 통째로 복사보다 작음")
         check(not [e for e in job["entries"] if e["before"].endswith(".ogg") and e.get("delta")], f"{mode}: 오디오 위치를 모르는 OGG 는 통째로")
@@ -398,7 +400,7 @@ def run_backup_checks(mode):
     app.processEvents()
 
     # 오디오가 달라진 파일: 태그만 보관한 백업으로는 되돌릴 수 없고 파일은 그대로
-    if backup.TAGS_ONLY:
+    if tags_only:
         p = paths[".flac"]
         f = next(x for x in w.model.files if x.path == p)
         w.apply_plans([Plan(f, changes={"comment": ["오디오 시험"]})], "오디오 시험")
@@ -446,27 +448,75 @@ def run_backup_checks(mode):
         check(not errors and sha(paths[".flac"]) == hash1, f"{mode}: 성공한 곡은 되돌림 {errors}")
 
 
-run_backup_checks("태그만 보관 · 메모리 사본" if backup.TAGS_ONLY else "기본")
-if safewrite.IS_WIN:  # 맥처럼: 통째로 보관 · 디스크 사본
-    saved_flags = backup.TAGS_ONLY, safewrite.MEM_STAGE
-    backup.TAGS_ONLY, safewrite.MEM_STAGE = False, False
-    run_backup_checks("통째로 · 디스크 사본 (맥과 같은 길)")
-    backup.TAGS_ONLY, safewrite.MEM_STAGE = saved_flags
+# 맥: 복제본으로 통째로 보관 (같은 APFS 디스크). 만들 수 없으면(외장 exFAT 등) 태그만 보관. Windows: 늘 태그만 보관
+_probe = fresh(".mp3")
+can_clone = safewrite.clone_preserving(_probe, _probe + ".probe")
+if can_clone:
+    os.unlink(_probe + ".probe")
+run_backup_checks("복제본" if can_clone else "기본", not can_clone and (backup.TAGS_ONLY or safewrite.IS_MAC))
+real_clone = backup.clone_preserving
+backup.clone_preserving = lambda s, t: False
+if safewrite.IS_MAC:
+    run_backup_checks("복제본을 못 만드는 디스크", True)
 
 # 안전 저장을 끄면 mutagen 이 원본에 바로 쓰므로 원본 전체를 보관한다
-if backup.TAGS_ONLY:
-    w = window()
-    w.opts = tagio.Options(safe_save=False)
+w = window()
+w.opts = tagio.Options(safe_save=False)
+p = fresh(".mp3")
+h0 = sha(p)
+w.load_paths([p], replace=True)
+app.processEvents()
+w.apply_plans([Plan(w.model.files[0], changes={"comment": ["안전 저장 끔"]})], "끔")
+app.processEvents()
+job = w.backups.jobs()[0]
+check(not job["entries"][0].get("delta"), "안전 저장을 끄면 원본 전체를 보관")
+w.backups.restore(job)
+check(sha(p) == h0, "되돌리면 원래대로")
+backup.clone_preserving = real_clone
+
+saved_flags = backup.TAGS_ONLY, safewrite.MEM_STAGE
+backup.TAGS_ONLY, safewrite.MEM_STAGE = False, False
+run_backup_checks("디스크 사본", safewrite.IS_MAC and not can_clone)
+backup.TAGS_ONLY, safewrite.MEM_STAGE = saved_flags
+
+if safewrite.IS_MAC:
+    def xattr_of(path):
+        got = subprocess.run(["/usr/bin/xattr", "-p", "com.localtag.test", path], capture_output=True, text=True)
+        return got.stdout.strip()
+
+    # 복제본: 만들 수 있으면 내용·확장 속성까지 같고, 못 만들면 아무것도 남기지 않는다 (복사하지 않는다)
     p = fresh(".mp3")
-    h0 = sha(p)
-    w.load_paths([p], replace=True)
-    app.processEvents()
-    w.apply_plans([Plan(w.model.files[0], changes={"comment": ["안전 저장 끔"]})], "끔")
-    app.processEvents()
-    job = w.backups.jobs()[0]
-    check(not job["entries"][0].get("delta"), "안전 저장을 끄면 원본 전체를 보관")
-    w.backups.restore(job)
-    check(sha(p) == h0, "되돌리면 원래대로")
+    subprocess.run(["/usr/bin/xattr", "-w", "com.localtag.test", "꼬리표", p], check=True)
+    clone = p + ".복제.mp3"
+    cloned = safewrite.clone_preserving(p, clone)
+    check(cloned == can_clone, "복제본을 만들 수 있는 디스크인지 그대로")
+    if cloned:
+        check(sha(clone) == sha(p) and xattr_of(clone) == "꼬리표", "복제본: 내용·확장 속성 그대로")
+        h0 = sha(clone)
+        check(safewrite.clone_preserving(p, clone) is False and sha(clone) == h0, "이미 있으면 만들지 않음 (덮어쓰지 않음)")
+    check(not os.path.exists(clone) or cloned, "못 만들면 조각을 남기지 않음")
+    missing = p + ".없음.mp3"
+    check(safewrite.clone_preserving("/dev/null", missing) is False and not os.path.lexists(missing), "복제본을 못 만들면 아무것도 남지 않음")
+    check(safewrite.clone_preserving(p + ".원본없음", missing) is False and not os.path.lexists(missing), "원본이 없어도 False")
+
+    # 메모리 사본의 마지막 수단(원본에 못 써서 교체): 권한·확장 속성은 원본대로, 수정 시각은 지금
+    os.chmod(p, 0o640)
+    mode0 = os.stat(p).st_mode & 0o777  # exFAT 에는 권한이 없다 (늘 같은 값)
+    os.utime(p, (1_600_000_000, 1_600_000_000))
+    audio0 = audio(p)
+    orig_pwrite = safewrite._pwrite
+
+    def broken_pwrite(fd, data, off):
+        raise OSError(5, "쓰기 실패 (시험)")
+
+    safewrite._pwrite = broken_pwrite
+    tagio.AudioFile.load(p, opts).save({"comment": ["교체 저장"]}, None, opts)
+    safewrite._pwrite = orig_pwrite
+    st = os.stat(p)
+    check(tagio.AudioFile.load(p, opts).get("comment") == "교체 저장" and audio(p) == audio0, "쓰기 실패 → 사본으로 교체 · 오디오 그대로")
+    check(xattr_of(p) == "꼬리표" and st.st_mode & 0o777 == mode0, f"교체해도 권한·확장 속성 그대로 ({oct(st.st_mode & 0o777)}, {xattr_of(p)!r})")
+    check(st.st_mtime > 1_600_000_000 + 86400, "교체해도 수정 시각은 지금")
+    check(not [x for x in os.listdir(os.path.dirname(p)) if x.startswith(safewrite.STAGE_PREFIX)], "교체 뒤 임시 파일 안 남음")
 
 # ---- 6) 남는 자리: 태그가 커져도 오디오를 한 번만 옮긴다
 for suffix in (".mp3", ".flac", ".m4a"):
@@ -552,13 +602,44 @@ def both(data):
     return out
 
 
+# ---- UTF-16 글 풀기: mutagen 과 결과·오류가 같다 (긴 코멘트·가사에서 곡당 수십 ms 가 줄어드는 곳)
+_dec_fast, _dec_slow = tagio._decode_terminated_fast, tagio._decode_terminated
+check(tagio._id3_specs.decode_terminated is _dec_fast, "UTF-16 글 풀기 교체됨")
+
+
+def decode_outcome(fn, data, encoding, strict):
+    try:
+        return fn(data, encoding, strict)
+    except Exception as e:
+        return type(e)
+
+
+pieces = [b"\0\0", b"\0", b"\xff\xfe", b"\xfe\xff", b"a", b"\xd8\x00", b"\x00\xd8", b"\xdc\x00", b"\x00\xdc", b"\xff\xff"]
+pieces += ["가a\U0001f600".encode(c) for c in ("utf-16-le", "utf-16-be")]
+pieces += ["\ufeff".encode("utf-16-le"), "\ufeff".encode("utf-16-be"), "\u0100\u0001".encode("utf-16-le")]
+rng = random.Random(1116)
+bad, tried = [], 0
+for _ in range(40000):
+    data = b"".join(rng.choice(pieces) for _ in range(rng.randrange(8)))
+    for head in (b"", b"\xff\xfe", b"\xfe\xff"):
+        for enc in ("utf16", "utf_16_be", "utf8", "latin1"):
+            strict = rng.random() < 0.5
+            tried += 1
+            a, b = decode_outcome(_dec_slow, head + data, enc, strict), decode_outcome(_dec_fast, head + data, enc, strict)
+            if a != b:
+                bad.append((head + data, enc, strict, a, b))
+check(not bad, f"무작위 {tried}번: mutagen 과 결과·오류가 같음 {bad[:3]}")
+
+
 pic = bytes(range(256)) * 300
 for version in (3, 4):
     tags = ID3()
     tags.add(TIT2(encoding=3, text=["제목 タイトル"]))
     tags.add(TPE1(encoding=1, text=["아이유", "IU"]))
-    tags.add(COMM(encoding=1, lang="kor", desc="", text=["코멘트"]))
-    tags.add(APIC(encoding=0, mime="image/jpeg", type=3, desc="", data=pic))
+    tags.add(COMM(encoding=1, lang="kor", desc="설명", text=["코멘트 \U0001f600"]))
+    tags.add(USLT(encoding=1, lang="kor", desc="", text="가사 첫 줄\n둘째 줄 " * 500))
+    tags.add(TXXX(encoding=2, desc="붙임", text=["값 하나", "값 둘"]))
+    tags.add(APIC(encoding=1, mime="image/jpeg", type=3, desc="앞", data=pic))
     sub = ID3Tags()
     sub.add(TIT2(encoding=3, text=["챕터 제목"]))
     tags.add(CHAP(element_id="c1", start_time=0, end_time=1000, start_offset=0, end_offset=0, sub_frames=sub))
@@ -567,6 +648,10 @@ for version in (3, 4):
     tags.save(buf, v2_version=version, v1=0)
     a, b = both(buf.getvalue())
     check(a == b, f"ID3v2.{version}: 같은 결과")
+    tagio._id3_specs.decode_terminated = _dec_slow
+    slow_text = ID3(io.BytesIO(buf.getvalue())).pprint()
+    tagio._id3_specs.decode_terminated = _dec_fast
+    check(ID3(io.BytesIO(buf.getvalue())).pprint() == slow_text and "둘째 줄" in slow_text, f"ID3v2.{version}: UTF-16 글을 풀어도 같은 결과")
     tags = ID3(io.BytesIO(buf.getvalue()))
     check(tags["TPE1"].text == (["아이유/IU"] if version == 3 else ["아이유", "IU"]), f"ID3v2.{version}: 값 {tags['TPE1'].text}")
     check(str(tags["CHAP:c1"].sub_frames["TIT2"]) == "챕터 제목" and tags["CTOC:toc"].child_element_ids == ["c1"], f"ID3v2.{version}: 챕터 안의 프레임")
@@ -692,6 +777,12 @@ if safewrite.IS_WIN:
 
 for _ in mainwindow._preload_steps():
     pass
+# 앱을 켤 때 불러오지 않는 모듈 (C 모듈 하나에 몇 ms 씩 든다 — 패키지에서도 뺀 것, 쓸 때 부르는 것)
+_not_at_start = ("plistlib", "multiprocessing", "ssl", "urllib.request", "concurrent.futures") + (("subprocess", "select") if safewrite.IS_MAC else ())
+_probe_code = "import sys; from localtag import mainwindow; print(' '.join(m for m in %r if m in sys.modules))" % (_not_at_start,)
+_got = subprocess.run([sys.executable, "-c", _probe_code], capture_output=True, text=True, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                      env=dict(os.environ, QT_QPA_PLATFORM="offscreen"))
+check(_got.returncode == 0 and not _got.stdout.strip(), f"앱을 켤 때 불러오지 않음: {_got.stdout.strip()!r} {_got.stderr[-200:]}")
 check(all(f"localtag.{n}" in sys.modules for n in mainwindow.PRELOAD_MODULES), "미리 불러오기 끝까지")
 check(tagio._file_options is not None, "형식 목록도")
 

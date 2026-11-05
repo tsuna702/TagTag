@@ -1,7 +1,7 @@
 """안전 저장: 사본에 쓰고 검증한 뒤 원본에 반영한다 (앨범태그 core.py 방식).
 
-- 사본은 같은 APFS 디스크면 복제본(clone)으로 만들어 즉시 끝난다
-  (Windows 는 메모리에 둔다 — 쓴 부분만 메모리에 두고 나머지는 원본에서 읽는다. 곡 크기와 상관없이 태그 부분만 읽는다)
+- 사본은 메모리에 둔다 — 쓴 부분만 메모리에 두고 나머지는 원본에서 읽는다. 곡 크기와 상관없이 태그 부분만 읽고,
+  곡 폴더에 임시 파일을 만들지 않는다 (복제본이 안 되는 외장 디스크(exFAT 등)에서 곡을 통째로 복사하지 않는다)
 - 원본에는 달라진 부분만 다시 쓴다 (파일 번호 유지). 오디오 데이터(MP3 프레임, FLAC 프레임, M4A mdat)의
   위치가 그대로면 원본의 오디오는 읽지도 쓰지도 않고 태그 부분만 비교해 다시 쓴다 (곡당 수 MB → 수백 KB).
   태그가 커져 오디오가 뒤로 밀렸으면 오디오 데이터가 바이트 단위로 같은지 확인한 뒤 다시 쓴다
@@ -25,7 +25,6 @@ IS_MAC = sys.platform == "darwin"
 IS_WIN = sys.platform == "win32"
 if IS_MAC:  # 맥에서만 쓴다 (Windows 는 앱이 켜지는 시간을 아낀다)
     import ctypes
-    import subprocess
 
 SF_DATALESS = 0x40000000  # iCloud 등에 있고 아직 내려받지 않은 파일
 RECALL_ON_DATA_ACCESS = 0x400000  # Windows: OneDrive "온라인 전용" 파일
@@ -45,10 +44,10 @@ else:  # Windows 에는 pread/pwrite 가 없다 — 한 fd 를 한 스레드에�
         os.lseek(fd, off, os.SEEK_SET)
         return os.write(fd, data)
 
-# Windows 는 작업 사본을 메모리에 둔다: 디스크에 새로 만든 파일은 열 때마다 백신(Defender)이 검사해 곡마다 몇 ms 씩 들고,
-# NTFS 에는 복제본(clone)이 없어 파일을 통째로 복사해야 한다. 메모리 사본에 쓴 양이 이보다 커지면 디스크 사본으로 다시 한다
-# (태그가 커져 아주 큰 파일의 오디오를 옮겨야 할 때뿐이다).
-MEM_STAGE = IS_WIN
+# 작업 사본은 메모리에 둔다. 디스크 사본은 맥의 내장 디스크(복제본)에서도 곡당 1 ms 넘게 들고, 복제본이 없는 디스크(exFAT·NTFS)에서는
+# 곡을 통째로 복사한다 (exFAT 디스크 이미지: 곡당 146 ms → 3 ms). Windows 는 새로 만든 파일을 열 때마다 백신(Defender)도 검사한다.
+# 메모리 사본에 쓴 양이 이보다 커지면 디스크 사본으로 다시 한다 (태그가 커져 아주 큰 파일의 오디오를 옮겨야 할 때뿐이다).
+MEM_STAGE = True
 MEM_STAGE_LIMIT = 256 * 1024 * 1024
 PAGE = 64 * 1024
 READ_AHEAD = 128 * 1024  # 작은 읽기가 이어지므로 원본에서 이만큼 앞서 읽어 둔다
@@ -262,8 +261,10 @@ CHUNK = 256 * 1024 if IS_WIN else 1024 * 1024
 # copyfile(3): cp -p 처럼 확장 속성(Finder 태그 등)·ACL·시각까지 복사한다.
 # COPYFILE_CLONE 이면 APFS에서는 데이터를 복사하지 않는 복제본(clone)을 만들어 즉시 끝나고 공간도 쓰지 않는다
 # (어느 한쪽을 고치면 그 부분만 새로 저장되므로 원본과 사본은 서로 영향을 주지 않는다).
+COPYFILE_METADATA = 0x7  # ACL·권한·확장 속성
 COPYFILE_ALL = 0xF
 COPYFILE_CLONE = 1 << 24
+COPYFILE_CLONE_FORCE = 1 << 25  # 복제본을 만들 수 없으면 복사하지 않고 실패
 _copyfile = None
 if IS_MAC:
     try:
@@ -289,7 +290,19 @@ def copy_preserving(src: str, dst: str):
             os.unlink(dst)
         if err not in (0, 45, 78):  # ENOTSUP, ENOSYS 이외의 오류는 그대로 알린다
             raise OSError(err, os.strerror(err), src)
+    import subprocess
     subprocess.run(["/bin/cp", "-p", src, dst], check=True, capture_output=True)
+
+
+def clone_preserving(src: str, dst: str) -> bool:
+    """복제본(clone)으로 만들 수 있을 때만 만든다 (맥의 같은 APFS 디스크). 못 만들면 False — 복사하지 않는다."""
+    if _copyfile is None or os.path.lexists(dst):
+        return False
+    if _copyfile(os.fsencode(src), os.fsencode(dst), None, COPYFILE_ALL | COPYFILE_CLONE_FORCE) == 0:
+        return True
+    if os.path.lexists(dst):
+        os.unlink(dst)
+    return False
 
 
 def _fsync(path: str):
@@ -342,7 +355,7 @@ def prewarm(paths):
 class IoBatch:
     """파일을 묶음으로 저장한다: with 안에서 이 스레드의 write_back 은 fsync 를 미루고, next(다음 묶음 경로) 를 부르면
     앞 묶음을 한꺼번에 디스크에 확정한 뒤 다음 묶음을 미리 열어 둔다 (prewarm). with 를 나갈 때 나머지를 확정한다.
-    다른 운영체제에서는 예전처럼 곡마다 fsync 한다. errors: 확정하지 못한 [(경로, 이유)]."""
+    맥은 곡마다 fsync 한다 (내장 디스크 0.1 ms, exFAT 이미지 1 ms — 스레드로 나눌 만큼 들지 않는다). errors: 확정하지 못한 [(경로, 이유)]."""
 
     def __init__(self):
         self.errors = []
@@ -503,7 +516,7 @@ def error_text(e: Exception) -> str:
 def safe_modify(path: str, fn, enabled: bool = True, keep_mtime: bool = False, inspect=None, before_move=None):
     """fn(작업할_경로)로 태그를 바꾼다. enabled면 사본에서 작업하고 검증 후 원본에 반영.
 
-    작업 사본은 디스크 파일 경로이거나 (Windows) 메모리 사본(MemStage)이다 — fn·inspect 는
+    작업 사본은 메모리 사본(MemStage)이거나 (아주 큰 파일의 오디오를 옮길 때) 디스크 파일 경로다 — fn·inspect 는
     mutagen 에 넘기기 전에 rewind() 를 거친다.
     fn 이 바꾸기 전 재생 시간(초)을 돌려주면 그것을 쓰고, 아니면 따로 읽는다.
     inspect(경로) 가 있으면 바뀐 파일을 읽은 결과(.length 가 있는 객체)를 돌려준다 —
@@ -715,6 +728,8 @@ def write_back(src, dst: str, protect=None, rewrite_rest=False):
             msg = ("원본에 쓰다가 실패해 일부만 바뀌었을 수 있습니다. 백업에서 되돌려 주세요." if touched
                    else "원본을 다시 쓰지 못했습니다. 원본은 그대로입니다.")
             raise SafeWriteError(f"{msg}\n{e}") from e
+        if _copyfile is not None and _copyfile(os.fsencode(dst), os.fsencode(path), None, COPYFILE_METADATA) == 0:
+            os.utime(path)  # 권한·Finder 태그 등은 원본대로, 수정 시각은 지금 (디스크 사본에 쓸 때와 같게)
         src.close()  # 원본을 열어 둔 채로는 교체할 수 없다
         src = path
     try:

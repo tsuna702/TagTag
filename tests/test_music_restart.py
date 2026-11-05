@@ -1,5 +1,6 @@
 """반영한 뒤 Music 다시 켜기 (Music 은 흉내만 — 실제 Music 을 끄거나 켜지 않는다)."""
 import os
+import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -34,7 +35,7 @@ class R:
         self.returncode = rc
 
 
-real_run = music.subprocess.run
+real_run = subprocess.run
 
 
 def fake_run(cmd, *a, **k):
@@ -48,7 +49,7 @@ def fake_run(cmd, *a, **k):
 
 
 music._osascript = fake_osascript
-music.subprocess.run = fake_run
+subprocess.run = fake_run
 
 check(music.restart("never") == "never" and not log, "하지 않기")
 check(music.restart("idle") == "restarted" and log == ["quit", "open"], f"멈춰 있으면 다시 켬 {log}")

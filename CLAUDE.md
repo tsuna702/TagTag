@@ -23,12 +23,16 @@ Mp3tag 를 본뜬 음악 태그 편집기. Python 3 + PySide6(Qt) + mutagen. Git
    - 커밋 끝에 `Co-Authored-By:` 줄을 붙인다.
 2. **테스트는 사용자의 실제 환경을 건드리지 않는다.** `tests/harness.py` 를 쓴다.
    - 설정은 임시 INI 로 바꿔 끼운다. 실제 설정(macOS plist, Windows 레지스트리 `HKCU\Software\LocalTag`)에 `clear()` 금지.
+   - `HOME`·`CFFIXED_USER_HOME` 를 임시 폴더로 바꿔도 **QSettings 는 격리되지 않는다** (맥의 cfprefsd 가 실제 plist 를 준다). 빌드한 앱을 따로 띄워 불러오기·저장을 시험할 때도
+     `mainwindow.QSettings` 를 INI 로 바꿔 끼운다 — 안 그러면 최근 폴더 같은 실제 설정을 덮어쓰고, 실제 `music_auto` 때문에 Music 이 켜진다 (1.1.16 작업 중 실제로 일어났다).
    - 앱 데이터(백업 등)는 `QStandardPaths.writableLocation` 을 실행 폴더로 돌린다.
      `setTestModeEnabled` 만 쓰면 `~/.qttest` 같은 곳에 쌓인다 — 예전에 5GB까지 커져 사용자가 지적했다.
    - Apple Music 자동 반영을 켠 채로 저장하지 않는다 (harness 가 확인한다). 실제 Music 보관함은 읽기만.
    - 테스트를 돌리면 **이번 실행 폴더만 남기고 이전 테스트 파일은 지운다** (harness 가 `tests/runs/` 에서 자동으로).
      이번 실행 폴더도 끝날 때 200MB 를 넘으면 지운다 (`harness.KEEP_LIMIT` — 곡을 많이 복사하는 속도 측정은 harness 를 쓰면 저절로 정리된다).
    - 샘플은 저장소 `samples/` 를 실행 폴더로 복사해서 쓴다. 원본 샘플을 고치지 않는다.
+   - 외장 디스크(exFAT) 동작은 **실제 외장에 쓰지 말고 디스크 이미지로** 시험한다 (`hdiutil create -fs ExFAT -type SPARSE …`). exFAT 에서는 새 파일마다 `._*` 가 생기고 이름이 NFD 로 돌아와,
+     `os.listdir` 로 세거나 한글 이름을 그대로 비교하는 테스트는 실패한다 (제품 문제가 아니다 — 폴더를 훑을 때 점 파일은 건너뛴다).
    - 실행: `python tests/smoke.py`, `python tests/test_*.py` (Windows: `.venv\Scripts\python tests\smoke.py`).
      작업 사본·저장 흐름·백업을 고치면 `tests/test_fast_save.py` 를 꼭 돌린다 (무작위 조작을 실제 파일과 비교, 되돌리면 바이트 단위로 같은지).
      속도는 곡 크기에 따라 다르다 — 샘플(1MB)이 아니라 실제 크기(MP3 10MB·FLAC 25MB, 커버 400KB)로 잰다.
@@ -50,16 +54,16 @@ Mp3tag 를 본뜬 음악 태그 편집기. Python 3 + PySide6(Qt) + mutagen. Git
 - 주석·docstring·UI 문구는 한국어, 짧게. 주변 코드의 말투와 밀도에 맞춘다.
 - 태그 쓰기는 **안전 저장**(`safewrite.safe_modify`): 사본에 쓰고 오디오 데이터가 바이트 단위로 같은지 확인한 뒤
   원본에는 달라진 부분만 다시 쓴다 (파일 번호가 그대로라 Music 이 곡을 놓치지 않는다). 이 흐름을 우회하지 않는다.
-  Windows 는 작업 사본을 **메모리**(`MemStage`, copy-on-write)에 둔다 — 쓴 부분만 메모리에 두고 나머지는 원본에서 읽으므로 곡 크기와 상관없이
+  작업 사본은 **메모리**(`MemStage`, copy-on-write)에 둔다 (맥은 1.1.16 부터) — 쓴 부분만 메모리에 두고 나머지는 원본에서 읽으므로 곡 크기·디스크 종류와 상관없이
   태그 부분만 읽는다. 사본을 받는 함수는 경로 대신 파일 객체도 받을 수 있고, mutagen 에 넘길 때는 꼭 `rewind(path)` 를 거친다
   (`mf.save()` 처럼 인자 없이 부르지 말고 `mf.save(rewind(path))`). 파일을 열 때는 `mutagen.File` 대신 `tagio._mf` (곡당 import 문 20여 개를 건너뛴다).
-- 여러 곡을 저장하는 곳은 `safewrite.IoBatch` 로 묶는다 (Windows): 바뀐 파일을 처음 열 때의 Defender 검사와 fsync 는 기다리는 시간이라 16개를 동시에 하면
+- 여러 곡을 저장하는 곳은 `safewrite.IoBatch` 로 묶는다 (Windows 만. 맥은 fsync 가 APFS 0.1 ms·exFAT 0.9 ms 라 스레드로 얻을 것이 없다): 바뀐 파일을 처음 열 때의 Defender 검사와 fsync 는 기다리는 시간이라 16개를 동시에 하면
   곡당 5~10 ms → 0.5 ms 다. 묶음을 시작할 때 미리 열고(`prewarm`, 끝나면 열린 파일이 없어야 한다 — 열려 있으면 이름을 못 바꾼다) 끝날 때 한꺼번에 확정한다.
   Windows 에서 1MB 넘는 메모리를 잡으면 느리므로 큰 파일을 다룰 때는 `safewrite.CHUNK`(256KB) 씩 나눈다.
 - 백업 기록(journal.log)은 `BACKUP_BATCH` 곡씩 백업을 먼저 하고 한 번에 fsync 한다 — 원본을 바꾸기 전에 확정된다.
-  Windows 는 MP3·FLAC·M4A 의 **오디오 밖만** `tags.pack` 에 보관한다 (`backup.TAGS_ONLY`). 오디오까지 다시 쓰게 되면 `safe_modify(before_move=…)` 로 쓰기 직전에 원본 전체를 보관한다 — 저장 흐름을 고칠 때 이 약속을 깨지 않는다.
+  맥은 같은 APFS 디스크면 복제본(`safewrite.clone_preserving`)으로 통째로 보관한다. 복제본을 못 만드는 곳(exFAT 외장 등 백업 폴더와 다른 디스크)과 Windows(`backup.TAGS_ONLY`)는 MP3·FLAC·M4A 의 **오디오 밖만** `tags.pack` 에 보관한다. 오디오까지 다시 쓰게 되면 `safe_modify(before_move=…)` 로 쓰기 직전에 원본 전체를 보관한다 — 저장 흐름을 고칠 때 이 약속을 깨지 않는다.
 - 태그가 남는 자리보다 커지면 오디오를 통째로 옮겨야 한다 (곡당 수십 ms). 그때 자리를 넉넉히 만들고 줄이지 않는다 (`tagio._pad_keep`, 커버를 바꿀 때만 `_pad_cover` 로 줄인다).
-- 앱이 켜지는 시간(Windows 0.47초): 처음에 불러오는 모듈에서 무거운 모듈(`concurrent.futures`, `ssl`, `plistlib` …)을 맨 위에서 import 하지 않는다. 글꼴은 맑은 고딕만으로 창을 먼저 띄우고 대체 글꼴은 뒤에서 읽어 바꾼다 (`_finish_fonts`, 처음부터 넣으면 0.5초 더 든다).
+- 앱이 켜지는 시간(Windows 0.47초, 맥 0.58초): 처음에 불러오는 모듈에서 무거운 모듈(`concurrent.futures`, `ssl`, `plistlib`, 맥의 `subprocess` …)을 맨 위에서 import 하지 않는다 (`test_fast_save.py` 가 확인한다). 맥 빌드는 `packaging/LocalTag.spec` 의 `excludes` 로 `multiprocessing`·`bz2`·`lzma`·`tarfile`·`_pydecimal` 등을 뺐다 (합쳐 40 ms) — 이것들을 쓰게 되면 거기서 먼저 지운다. 글꼴은 맑은 고딕만으로 창을 먼저 띄우고 대체 글꼴은 뒤에서 읽어 바꾼다 (`_finish_fonts`, 처음부터 넣으면 0.5초 더 든다).
 - 표 모델 `data()`·`flags()` 는 한 번 그리는 데 수천 번 불린다 — 안에서 `Qt.XxxRole` 을 꺼내 쓰지 말고 미리 만든 정수와 비교한다.
 - 태그 가져오기의 인터넷 요청은 서로 기다릴 필요가 없으면 `tagsource._together` 로 동시에 보낸다 (스토어 여러 곳 + MusicBrainz).
 - 파일을 바꾸는 작업은 `Plan` 목록을 만들어 `MainWindow.apply_plans` 로 적용한다 → 백업·실행 취소·Music 반영이 따라온다.

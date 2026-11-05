@@ -1,6 +1,6 @@
 """저장 속도 개선이 안전 저장·백업을 해치지 않는지.
 
-- Windows: 작업 사본을 디스크가 아니라 메모리에 둔다 (곡마다 새 파일을 만들지 않음). 형식마다 저장·되돌리기·오디오 검증
+- 작업 사본을 디스크가 아니라 메모리에 둔다 (곡마다 새 파일을 만들지 않음). 형식마다 저장·되돌리기·오디오 검증
 - 백업 기록을 여러 곡씩 모아 확정해도: 묶음보다 많은 곡을 저장한 뒤 백업 관리자에서 모두 되돌릴 수 있다
 - 백업 사본을 만들지 못한 곡은 바꾸지 않는다
 """
@@ -22,7 +22,7 @@ w = window()
 w.load_paths([d], replace=True)
 app.processEvents()
 
-# 1) 형식마다 저장 → 다시 읽기 → 되돌리기, Windows 에서는 디스크 작업 사본을 만들지 않는다
+# 1) 형식마다 저장 → 다시 읽기 → 되돌리기, 디스크 작업 사본을 만들지 않는다
 copies = []
 orig_copy = safewrite.copy_preserving
 safewrite.copy_preserving = lambda s, t: (copies.append(t), orig_copy(s, t))[1]
@@ -38,7 +38,7 @@ w.apply_plans([Plan(f, changes={"title": ["메모리 저장"]}) for f in w.model
 app.processEvents()
 stage_copies = [c for c in copies if os.path.basename(c).startswith(safewrite.STAGE_PREFIX)]
 if safewrite.MEM_STAGE:
-    check(not stage_copies, f"Windows: 디스크 작업 사본을 만들지 않음 ({len(stage_copies)}개)")
+    check(not stage_copies, f"디스크 작업 사본을 만들지 않음 ({len(stage_copies)}개)")
 safewrite.copy_preserving = orig_copy
 for f in w.model.files:
     check(f.get("title") == "메모리 저장", f"{f.ext} 저장 → 목록 값")
