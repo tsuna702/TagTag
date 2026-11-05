@@ -63,7 +63,7 @@ Mp3tag 를 본뜬 음악 태그 편집기. Python 3 + PySide6(Qt) + mutagen. Git
 - 백업 기록(journal.log)은 `BACKUP_BATCH` 곡씩 백업을 먼저 하고 한 번에 fsync 한다 — 원본을 바꾸기 전에 확정된다.
   맥은 같은 APFS 디스크면 복제본(`safewrite.clone_preserving`)으로 통째로 보관한다. 복제본을 못 만드는 곳(exFAT 외장 등 백업 폴더와 다른 디스크)과 Windows(`backup.TAGS_ONLY`)는 MP3·FLAC·M4A 의 **오디오 밖만** `tags.pack` 에 보관한다. 오디오까지 다시 쓰게 되면 `safe_modify(before_move=…)` 로 쓰기 직전에 원본 전체를 보관한다 — 저장 흐름을 고칠 때 이 약속을 깨지 않는다.
 - 태그가 남는 자리보다 커지면 오디오를 통째로 옮겨야 한다 (곡당 수십 ms). 그때 자리를 넉넉히 만들고 줄이지 않는다 (`tagio._pad_keep`, 커버를 바꿀 때만 `_pad_cover` 로 줄인다).
-- 앱이 켜지는 시간(Windows 0.47초, 맥 0.58초): 처음에 불러오는 모듈에서 무거운 모듈(`concurrent.futures`, `ssl`, `plistlib`, 맥의 `subprocess` …)을 맨 위에서 import 하지 않는다 (`test_fast_save.py` 가 확인한다). 맥 빌드는 `packaging/LocalTag.spec` 의 `excludes` 로 `multiprocessing`·`bz2`·`lzma`·`tarfile`·`_pydecimal` 등을 뺐다 (합쳐 40 ms) — 이것들을 쓰게 되면 거기서 먼저 지운다. 글꼴은 맑은 고딕만으로 창을 먼저 띄우고 대체 글꼴은 뒤에서 읽어 바꾼다 (`_finish_fonts`, 처음부터 넣으면 0.5초 더 든다).
+- 앱이 켜지는 시간(Windows 0.47초, 맥 0.59초): 처음에 불러오는 모듈에서 무거운 모듈(`concurrent.futures`, `ssl`, `plistlib`, 맥의 `subprocess` …)을 맨 위에서 import 하지 않는다 (`test_fast_save.py` 가 확인한다). 맥 빌드는 `packaging/LocalTag.spec` 의 `excludes` 로 `multiprocessing`·`bz2`·`lzma`·`tarfile`·`_pydecimal` 등을 뺐다 (합쳐 40 ms) — 이것들을 쓰게 되면 거기서 먼저 지운다. 글꼴은 맑은 고딕만으로 창을 먼저 띄우고 대체 글꼴은 뒤에서 읽어 바꾼다 (`_finish_fonts`, 처음부터 넣으면 0.5초 더 든다).
 - 표 모델 `data()`·`flags()` 는 한 번 그리는 데 수천 번 불린다 — 안에서 `Qt.XxxRole` 을 꺼내 쓰지 말고 미리 만든 정수와 비교한다.
 - 태그 가져오기의 인터넷 요청은 서로 기다릴 필요가 없으면 `tagsource._together` 로 동시에 보낸다 (스토어 여러 곳 + MusicBrainz).
 - 파일을 바꾸는 작업은 `Plan` 목록을 만들어 `MainWindow.apply_plans` 로 적용한다 → 백업·실행 취소·Music 반영이 따라온다.
